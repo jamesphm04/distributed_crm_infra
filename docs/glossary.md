@@ -48,7 +48,27 @@ Terminology introduced while building this project, written as it was actually e
 
 **`SET NX`** — Redis's "set if not exists" command. Used here as the atomic primitive behind the idempotency claim: the first caller to `SET NX` a given key wins the claim; everyone else's `SET NX` fails, telling them someone else got there first.
 
-## RabbitMQ
+## Azure Service Bus
+
+**Namespace** — Service Bus's top-level container (its own endpoint, e.g. `sb-distributed-crm.servicebus.windows.net`); queues live inside it. The emulator always has exactly one, `sbemulatorns`.
+
+**Lock (peek-lock)** — when a consumer receives a message it is hidden from everyone else, not deleted, until the consumer completes it or `LockDuration` runs out (then it reappears). The Service Bus equivalent of RabbitMQ's "unacked" state, but timer-based instead of connection-based.
+
+**Complete / abandon / dead-letter** — the consumer's three verdicts: complete = done, delete it; abandon = release the lock now so it's redelivered; dead-letter = move it to the DLQ with a reason.
+
+**Delivery count / `MaxDeliveryCount`** — how many times a message has been handed out. Each lost lock or abandon increments it; reaching `MaxDeliveryCount` dead-letters the message automatically. Here it's the crash safety net, not the retry mechanism.
+
+**Dead-letter subqueue** — every queue has a built-in `$DeadLetterQueue`. Messages there carry a `DeadLetterReason` and `DeadLetterErrorDescription`. Replaces Phase 4's hand-built DLX + DLQ.
+
+**Scheduled message** — a message sent with a future enqueue time; it sits invisible to receivers until then. This project's retry delay: schedule a copy 30s ahead instead of RabbitMQ's TTL holding-pen queue.
+
+**Duplicate detection** — the queue remembers every `MessageId` it saw within a time window and silently drops repeats (the sender still gets success). Makes "send at least once" (the outbox) behave like "enqueue exactly once" within the window.
+
+**Application properties** — custom key/value headers on a message (here `retry-count`), the equivalent of RabbitMQ message headers.
+
+**`ServiceBusProcessor`** — the SDK's push-style consumer: it receives, renews locks, runs your handler with bounded concurrency, and reconnects on errors. You only write the per-message handler.
+
+## RabbitMQ (Phase 4, no longer in the code)
 
 **Message broker** — a system for transporting messages between processes (unlike a database, which stores queryable data). RabbitMQ delivers a message once and it's gone — there's no "GET a key" equivalent.
 

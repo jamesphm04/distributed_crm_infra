@@ -26,18 +26,29 @@ services:
       timeout: 3s
       retries: 10
 
-  rabbitmq:
-    image: rabbitmq:3-management
-    container_name: distributed-crm-rabbitmq
+  servicebus-sql:
+    image: mcr.microsoft.com/azure-sql-edge:1.0.7 # the emulator's private storage - our apps never connect to it
+    container_name: distributed-crm-servicebus-sql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "DevPassword-123!"
+    # no ports: only the emulator talks to it, over the Compose network
+
+  servicebus:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.1
+    container_name: distributed-crm-servicebus
+    depends_on:
+      - servicebus-sql
+    volumes:
+      - ./servicebus/Config.json:/ServiceBus_Emulator/ConfigFiles/Config.json:ro
     ports:
-      - "127.0.0.1:5672:5672" # AMQP protocol
-      - "127.0.0.1:15672:15672" # management UI = http://localhost:15672 (guest/guest)
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
-      interval: 2s
-      timeout: 5s
-      retries: 15
-  
+      - "127.0.0.1:5672:5672" # AMQP
+      - "127.0.0.1:5300:5300" # management + health
+    environment:
+      SQL_SERVER: servicebus-sql
+      MSSQL_SA_PASSWORD: "DevPassword-123!"
+      ACCEPT_EULA: "Y"
+
   be:
     build: ../distributed_crm_be
     container_name: distributed-crm-be
@@ -46,15 +57,15 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      servicebus:
+        condition: service_started # the emulator image has no shell for a healthcheck; the SDK retries until it's up
     ports:
       - "127.0.0.1:5214:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword;Gss Encryption Mode=Disable"
       ConnectionStrings__Redis: "redis:6379"
-      RabbitMq__Host: rabbitmq
+      ConnectionStrings__ServiceBus: "Endpoint=sb://servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
       GoogleAuth__ClientId: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID in .env}
       GoogleAuth__AllowedEmails__0: ${ALLOWED_EMAIL:?set ALLOWED_EMAIL in .env}
 
@@ -66,12 +77,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      servicebus:
+        condition: service_started # the emulator image has no shell for a healthcheck; the SDK retries until it's up
     environment:
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword;Gss Encryption Mode=Disable"
       ConnectionStrings__Redis: "redis:6379"
-      RabbitMq__Host: rabbitmq
+      ConnectionStrings__ServiceBus: "Endpoint=sb://servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
 
 volumes:
   distributed-crm-pgdata:

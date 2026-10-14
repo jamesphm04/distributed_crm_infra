@@ -12,10 +12,10 @@ distributed_crm_fe       React + TypeScript (Vite), linted with Oxlint
 
 Postgres   — system of record: `return_requests`, plus `outbox_messages`
 Redis      — idempotency store + read-through cache
-RabbitMQ   — async handoff from API to worker, with a retry/DLX topology
+Service Bus — async handoff from API to worker (Azure Service Bus; the official emulator locally), with scheduled retries and a dead-letter queue
 ```
 
-All three backing services, plus `be` and `worker`, run via `docker-compose.yml` in this repo. Port mappings are in `setup.md`.
+All three backing services (plus the emulator's private SQL Edge container), and `be` and `worker`, run via `docker-compose.yml` in this repo. Port mappings are in `setup.md`.
 
 ## Domain
 
@@ -40,12 +40,12 @@ Every endpoint requires `Authorization: Bearer <Google ID token>` from an allowl
 
 | Endpoint | Notes |
 |---|---|
-| `POST /api/return-requests` | Requires `Idempotency-Key` header. Creates the record and an `outbox_messages` row in one transaction; the outbox relay publishes the `created` event to RabbitMQ. |
+| `POST /api/return-requests` | Requires `Idempotency-Key` header. Creates the record and an `outbox_messages` row in one transaction; the outbox relay publishes the `created` event to Service Bus. |
 | `GET /api/return-requests/{id}` | Cache-aside read through Redis. |
 | `GET /api/return-requests?page=&pageSize=` | Paginated list, no caching. |
 | `POST /api/return-requests/{id}/cancel` | Optimistic concurrency (`xmin` token) + state-machine guard, both map to `409`. |
 
-Clean Architecture layering: `Domain` has zero external dependencies; `Application` defines the ports (`IReturnRequestRepository`, `IUnitOfWork`, `IIdempotencyStore`, `IReturnRequestCache`, `IReturnRequestQueue`) and the use-case handlers; `Infrastructure` implements those ports against Postgres/Redis/RabbitMQ; `Api` wires DI, handles authentication/authorization, and exposes controllers.
+Clean Architecture layering: `Domain` has zero external dependencies; `Application` defines the ports (`IReturnRequestRepository`, `IUnitOfWork`, `IIdempotencyStore`, `IReturnRequestCache`, `IReturnRequestQueue`) and the use-case handlers; `Infrastructure` implements those ports against Postgres/Redis/Service Bus; `Api` wires DI, handles authentication/authorization, and exposes controllers.
 
 ## Authentication (Google ID tokens)
 
@@ -90,49 +90,50 @@ Key format: `idempotency:{key}`.
 
 Key format: `returnrequest:{id}`.
 
-## Queue + retry topology (RabbitMQ)
+## Queue + retry design (Azure Service Bus)
 
-`RabbitMqReturnRequestQueue` implements `IReturnRequestQueue`, published to by the outbox relay (`OutboxPublisherBackgroundService`); `ReturnRequestConsumer` in `distributed_crm_worker` consumes. Phase 7 replaces this with Azure Service Bus.
+One queue, `return-requests`, in namespace `sbemulatorns` locally.
+It is defined **outside** the apps — `servicebus/Config.json` in this repo for the emulator, Bicep in Azure (Phase 9) — and neither app declares topology.
+The queue name is the one coupling point between `be` and `worker`.
 
-Three-exchange retry/DLX pattern (avoids needing the delayed-message-exchange plugin):
+Queue settings (emulator values; Azure differs where the emulator caps them):
+
+| Setting | Value | Why |
+|---|---|---|
+| `LockDuration` | 1 min | A received message is hidden from other consumers until completed or the lock expires; the SDK renews it while processing. |
+| `MaxDeliveryCount` | 5 | Crash safety net: a message whose lock keeps getting lost (worker crash) is dead-lettered automatically. |
+| `DefaultMessageTimeToLive` | 1 h (emulator max; 14 d in Azure) | How long a message may wait. |
+| `DeadLetteringOnMessageExpiration` | true | An expired message goes to the DLQ instead of vanishing. |
+| `RequiresDuplicateDetection` | true, 5 min window (emulator max; 10 min in Azure) | Repeated `MessageId`s are dropped. |
+
+**Producer (`be`):** `ServiceBusReturnRequestQueue` implements `IReturnRequestQueue`, called by the outbox relay (`OutboxPublisherBackgroundService`).
+Each message is `{"returnRequestId": "..."}` with `MessageId = return-request-created:{id}`, `Subject = ReturnRequestCreated`, `ContentType = application/json`.
+The deterministic `MessageId` means an outbox re-send after a crash is dropped by duplicate detection.
+
+**Consumer (`worker`):** `ReturnRequestConsumer` runs a `ServiceBusProcessor` (`MaxConcurrentCalls = 1`, `AutoCompleteMessages = false`):
 
 ```
-API publish ("created")
-        │
-        ▼
-Exchange: return-requests ────▶ Queue: return-requests.process  ◄── worker consumes here
-                                          │
-                              success ◄───┴───▶ failure (nack, requeue:false)
-                                │                       │
-                               ack                x-dead-letter-exchange
-                                                  = return-requests.retry
-                                                          │
-                                                          ▼
-                                          Exchange: return-requests.retry
-                                                          │
-                                                          ▼
-                                          Queue: return-requests.retry
-                                          (no consumer — waits out x-message-ttl = 30s)
-                                                          │
-                                          TTL expires → x-dead-letter-exchange
-                                          = return-requests (loops back to top)
+receive (locked)
+  ├─ malformed body / empty id ──────────────────────▶ DeadLetter("MalformedPayload")
+  ├─ handler succeeds / concurrency conflict ────────▶ Complete (after the Postgres commit)
+  └─ handler throws
+       ├─ retry-count < 3 ─▶ Schedule copy at now+30s (retry-count+1, MessageId …:retry-N), then Complete original
+       └─ retry-count = 3 ─▶ DeadLetter("MaxRetriesExceeded", error message)
 
-
-  After N failed attempts (checked via the x-death header — not automatic):
-                                          Exchange: return-requests.dlx
-                                                          │
-                                                          ▼
-                                          Queue: return-requests.dlq
-                                          (terminal — no consumer, no TTL, human inspects)
+worker crashes / lock lost ─▶ Service Bus redelivers; after MaxDeliveryCount (5) it dead-letters on its own
 ```
 
-Message payload is just `{ returnRequestId }` — the worker re-fetches current state from Postgres rather than trusting a possibly-stale embedded payload.
+The dead-letter queue is the queue's built-in `$DeadLetterQueue` subqueue — terminal, nothing consumes it, a human inspects it.
+Scheduling happens before completing, so a crash in between causes one extra attempt (tolerated by the handler's status guards and `xmin`), never a lost message.
 
-Topology is declared idempotently by `RabbitMqReturnRequestQueue.DeclareTopologyAsync`, called once at API startup (forced via `app.Services.GetRequiredService<IConnection>()` right after `builder.Build()`, since `AddSingleton` alone is lazy and won't run the factory until something resolves it). The worker declares the same topology independently at its own startup.
+**Connections:** both apps register `ServiceBusClient` via `AddAzureClients(...AddServiceBusClient(connectionString))`.
+The client connects lazily and retries on its own, so there is no startup retry loop; Phase 10 switches to `AddServiceBusClientWithNamespace` + managed identity.
+
+Phase 4's RabbitMQ three-exchange retry/DLX topology is gone from the code; see `decisions.md` and `progress.md` for how it worked and how it maps onto this design.
 
 ## `distributed_crm_worker` — current state
 
-Built: `ReturnRequestConsumer` subscribes to `return-requests.process`, `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. Per `decisions.md`, it shares no code with the API's Domain/Application projects.
+Built: `ReturnRequestConsumer` processes `return-requests` (see above), `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. Per `decisions.md`, it shares no code with the API's Domain/Application projects.
 
 ## `distributed_crm_fe` — current state
 

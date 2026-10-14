@@ -59,7 +59,7 @@ Both repos involved are public, so these values never go into git.
    - API (`be`): `5214` → `8080`
    - Postgres: `5436` → `5432`
    - Redis: `6380` → `6379`
-   - RabbitMQ: `5672` → `5672` (AMQP), `15672` → `15672` (management UI, `http://localhost:15672`, default `guest`/`guest`)
+   - Service Bus emulator: `5672` → `5672` (AMQP), `5300` → `5300` (health: `curl http://localhost:5300/health`). Takes ~30s to become healthy; the apps retry until it is. Its SQL Edge storage container publishes no ports.
 4. Apply migrations (creates the schema in the fresh database):
    ```bash
    cd ../distributed_crm_be
@@ -73,7 +73,7 @@ Both repos involved are public, so these values never go into git.
 
 Useful for debugging, or for running a second instance to test statelessness/idempotency (see `decisions.md`).
 
-1. Start only the backing services: `docker compose up -d postgres redis rabbitmq` (from `distributed_crm_infra`).
+1. Start only the backing services: `docker compose up -d postgres redis servicebus` (from `distributed_crm_infra`).
 2. Put the Google values in user secrets (stored in `~/.microsoft/usersecrets/`, outside the repo):
    ```bash
    cd distributed_crm_be
@@ -113,6 +113,7 @@ curl -i -X POST http://localhost:5214/api/return-requests \
 
 ## Common gotchas
 
+- The emulator has no web UI. Queue settings live in `servicebus/Config.json` and are only read at emulator startup (`docker compose up -d --force-recreate servicebus` after editing). The emulator rejects values above its limits (e.g. a duplicate-detection window over 5 minutes) and refuses to start — check `docker compose logs servicebus`.
 - `401` with `WWW-Authenticate: Bearer` and no `error=` → no token was sent. With `error="invalid_token"` → the token was rejected; `docker compose logs be` shows the `IDX...` reason (expired, wrong audience, bad signature).
 - `403` → the token is valid but the email isn't on the allowlist (or isn't verified); the `be` log has a `Denied:` line saying which.
 - `--no-launch-profile` skips `launchSettings.json` entirely, including its `ASPNETCORE_ENVIRONMENT=Development` default — always set that env var explicitly alongside it, or `appsettings.Development.json` (connection strings) and user secrets silently won't load.

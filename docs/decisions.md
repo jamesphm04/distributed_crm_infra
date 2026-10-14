@@ -181,3 +181,53 @@ JwtBearer validates tokens with Google's public keys, not DataProtection, and th
 Persisting keys to Redis/Blob would add infrastructure for nothing; silencing the category would hide the warning if something ever *does* start using DataProtection.
 
 **Revisit if:** anything starts using DataProtection (cookie auth, antiforgery, `IDataProtector`). With 2 replicas in Phase 10, keys must then be shared (Blob Storage + Key Vault is the Azure-conventional pair), or a value protected on one replica can't be read on the other.
+
+## Service Bus retries: scheduled copy + explicit dead-letter, with `MaxDeliveryCount` as the crash net
+
+**Decision:** on a processing failure the worker schedules a copy of the message 30s ahead (`retry-count` + 1 in its application properties) and completes the original.
+After 3 retries (4 attempts, same as Phase 4) it dead-letters the message explicitly with reason `MaxRetriesExceeded`.
+The queue's `MaxDeliveryCount` (5) is only the safety net for crashes and lost locks.
+
+**Why not just abandon and let `MaxDeliveryCount` do the retries:** abandon redelivers *immediately* — no backoff, so all attempts burn through within seconds against a failing third-party API.
+Scheduled messages are Service Bus's built-in way to delay, replacing Phase 4's TTL holding-pen queue.
+
+**Why schedule-then-complete, not a transaction:** two separate calls, ordered so a crash in between causes one extra attempt (tolerated by the handler's status guards and `xmin`), never a lost message.
+Service Bus transactions could make it atomic, but that's extra machinery for a failure mode that's already harmless here.
+
+**Each retry copy gets its own `MessageId`** (`…:retry-N`) — otherwise duplicate detection would drop it as a repeat of the original.
+
+**Malformed payloads**, including `{}` (which deserializes to `Guid.Empty` rather than failing), are dead-lettered immediately with reason `MalformedPayload`.
+
+## Deterministic `MessageId` + duplicate detection instead of changing the outbox port
+
+**Decision:** `be` sets `MessageId = return-request-created:{returnRequestId}` and the queue has duplicate detection on.
+
+**Why:** the outbox relay can send twice if it crashes between `SendMessageAsync` and `MarkProcessed()`. Duplicate detection drops the repeat inside its window.
+The outbox row's own id would also work, but `IReturnRequestQueue` only receives the return-request id; since there's exactly one "created" event per return request, that id is already unique per event, and the Application-layer port stays unchanged.
+Verified live: two sends with the same `MessageId` both reported success, and only one message was in the queue.
+
+## Queue topology lives outside the apps
+
+**Decision:** neither app declares queues. The emulator reads `servicebus/Config.json`; Azure gets the same queue from Bicep (Phase 9).
+
+**Why:** in Phase 4 both apps declared identical RabbitMQ topology at startup, which duplicated it in two repos and needed management rights at runtime.
+With Service Bus, topology is infrastructure: the apps only need send/receive rights, which is also what their managed identities will be granted in Phase 9 (`Azure Service Bus Data Sender` / `Data Receiver`), not `Manage`.
+
+**Emulator limits found by running it:** duplicate-detection window at most 5 minutes (the emulator refuses to start otherwise), message TTL at most 1 hour.
+Azure gets 10 minutes and 14 days. Bicep must also set `deadLetteringOnMessageExpiration: true` and `requiresDuplicateDetection: true` — the latter can only be set when a queue is created.
+
+## No hand-rolled connection retry for Service Bus
+
+**Decision:** both apps register `ServiceBusClient` through `Microsoft.Extensions.Azure` (`AddAzureClients`) and rely on the SDK's lazy connect + built-in retry. The RabbitMQ retry-with-backoff loops and the forced eager resolution in both `Program.cs` files are deleted, not ported.
+
+**Why:** same lesson as `AbortOnConnectFail = false` for Redis — use the client's own resilience instead of reimplementing it.
+Verified live: the worker started ~25s before the emulator was ready, logged `Connection refused` warnings, and attached its receiver on its own once the emulator came up.
+With the emulator stopped while `be` was running, a new request stayed `Pending` with its outbox row unrelayed, then went to `Approved` within ~30s of the emulator restarting — nothing lost.
+
+**Compose consequence:** the emulator image is distroless (no shell, no `curl`), so it can't have a Docker healthcheck. `be`/`worker` use `depends_on: condition: service_started`; the apps' own retry is what actually matters (Phase 5 lesson).
+
+## Azure SDK logs at `Warning`
+
+**Decision:** `Azure.Core` and `Azure.Messaging.ServiceBus` are set to `Warning` in both apps.
+
+**Why:** at `Information` the SDK logs several lines per send/receive (link creation, operation start/complete). At `Warning`, a normal create → `Approved` cycle produces zero log lines, while connection problems still show up.

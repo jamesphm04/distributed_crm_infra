@@ -109,7 +109,29 @@ Phases 6–15 were re-planned on 2026-10-14 so this project touches every compon
 
 **Old dev data, not a bug:** seven rows stuck at `Pending`/`Processing` (ORD-2000 ×2, ORD-3000, ORD-9000, ORD-1001, ORD-FAIL-001, ORD-DOCKER-001) all predate the transactional outbox and have no `outbox_messages` row. `ORD-FAIL-001` is the deliberate Phase 4 DLQ test.
 
-## Phase 7 — Azure Service Bus replaces RabbitMQ — not started
+## Phase 7 — Azure Service Bus replaces RabbitMQ — done, verified end-to-end
+
+- **Emulator in Compose:** `servicebus` (`mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.1`) plus its private storage `servicebus-sql` (`azure-sql-edge:1.0.7` — pinned because `2.0.0` is x86-only, `1.0.7` runs natively on Apple Silicon). Queue `return-requests` defined in `servicebus/Config.json`. RabbitMQ removed from Compose.
+- **`be`:** `ServiceBusReturnRequestQueue` replaces `RabbitMqReturnRequestQueue` behind the unchanged `IReturnRequestQueue` port; deterministic `MessageId` for duplicate detection. Application and Domain untouched.
+- **`worker`:** `ReturnRequestConsumer` rewritten on `ServiceBusProcessor`: scheduled-copy retries (30s, 3 retries), explicit dead-letter (`MaxRetriesExceeded`, `MalformedPayload`), `MaxDeliveryCount` as the crash net. `ProcessReturnRequestHandler` untouched.
+- Both apps: `ServiceBusClient` via `AddAzureClients`; the hand-rolled RabbitMQ startup retry loops are deleted; `RabbitMQ.Client` removed; `Azure.*` logs at `Warning`.
+- Package alignment: `be` Infrastructure's `Microsoft.Extensions.Hosting.Abstractions` 10.0.0 → 10.0.12 and `worker`'s `Microsoft.Extensions.Hosting` 10.0.5 → 10.0.12 (the Service Bus SDK's `Azure.Core` needs ≥ 10.0.10; NuGet treated the downgrade as an error).
+
+**Verified live** against the containerized stack (requests created as `return_requests` + `outbox_messages` rows in one transaction — exactly what the API's create does — so the outbox relay, Service Bus and worker run for real; queues inspected with a throwaway SDK peek script):
+- Happy path: `Pending` → `Approved` in ~1.6s.
+- Failure path (`FailureRate=1.0`): attempts at +0s, +31s, +62s, +93s, then dead-lettered with `MaxRetriesExceeded` and the error text; the row correctly stayed `Processing`. Retry copies carried `retry-count` 1–3 and `MessageId` `…:retry-N`.
+- Malformed payloads (`not json` and `{}`) dead-lettered immediately as `MalformedPayload`.
+- Duplicate detection: two sends with the same `MessageId` (worker stopped) → one message in the queue.
+- Broker outage: emulator stopped, request created → stayed `Pending`, outbox row unrelayed; emulator restarted → `Approved` ~30s later.
+- Startup ordering: worker started before the emulator was ready, logged `Connection refused`, attached its receiver on its own.
+
+**Not verified live:** `MaxDeliveryCount` dead-lettering after repeated worker crashes mid-message (needs killing the worker inside a ~1.5s window five times).
+Also checked: a worker started with `dotnet run` (Development config) attached its receiver through `localhost:5672`.
+
+**Bugs found along the way:**
+- `Config.json` typos (`DeadLetteringOnMessageExpire`, `RequiresDupplicateDetection`, `RequireDetectionHistoryTimeWindow`) — caught on review and checked against the emulator's published schema before first boot.
+- Emulator rejects a duplicate-detection window over 5 minutes and refuses to start (`Expected time to be less than or equal to 5m`).
+- Phase 4's consumer treated `{}` as a valid message for `Guid.Empty` and acked it away as "not found"; the new consumer dead-letters it.
 
 ## Phase 8 — Deploy readiness + OpenTelemetry — not started
 
@@ -145,3 +167,4 @@ Phases 6–15 were re-planned on 2026-10-14 so this project touches every compon
 - `distributed_crm_fe`: never committed. Deliberately left as-is — no app code yet.
 - `distributed_crm_infra`: first commit made 2026-10-14, holds `docker-compose.yml` and `docs/`. Pushed to GitHub, public, under `jamesphm04`.
 - Phase 6 changes `be`, `worker` (log level + connection string only) and `infra`.
+- Phase 7 changes `be`, `worker` and `infra`.
