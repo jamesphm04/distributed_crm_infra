@@ -80,16 +80,56 @@ All 7 were fixed and re-verified live against the containerized stack.
 
 **Verified live:** created several return requests against the rebuilt containerized stack; confirmed cache invalidation via `redis-cli monitor`, confirmed the outbox relay publishing via `be` logs, and confirmed the new consumer logging fires correctly on the simulated API's real ~30% failure rate (nack → retry → self-heal, no DLQ involvement).
 
-## Phase 6 — Azure deployment — not started
+Phases 6–15 were re-planned on 2026-10-14 so this project touches every component the WCP portal will use — see "Rehearse every WCP component" in `decisions.md`, and the roadmap in `CLAUDE.md` for what each phase covers.
 
-- Switched from AWS EC2 + ALB to Azure on 2026-10-14, to match where the WCP portal plans to host.
-- Postgres moves from a self-hosted container to Azure Database for PostgreSQL Flexible Server for this phase; Redis, RabbitMQ, and the app containers stay self-hosted on VMs.
+## Phase 6 — Thin Google sign-in — done, verified end-to-end
 
-## Phase 7 — Load testing (k6/Locust) — not started
+- Google Cloud OAuth 2.0 client (type "Web application") created, with the OAuth Playground as its only redirect URI for now.
+  Phase 11 reuses the same client and adds the Static Web Apps origin.
+  The Cloud project's consent screen is Internal to the `wholesalecarparts.com.au` Workspace, so only that org's accounts can sign in.
+- `distributed_crm_be` validates Google ID tokens with `AddJwtBearer`: `Authority = https://accounts.google.com` (discovery document + JWKS, refreshed automatically on key rotation), both Google issuer spellings, the client ID as the only valid audience, default expiry check.
+- `AllowedEmailRequirement` + `AllowedEmailHandler` (all in `Api/Authentication/`): the token's `email` must have `email_verified: true` and be on `GoogleAuth:AllowedEmails`, case-insensitive. A denial logs a `warn` with the reason.
+- One policy (authenticated + allowlisted) is both the **default** policy (what `[Authorize]` means) and the **fallback** policy (what an unannotated endpoint gets). `[Authorize]` is on `ReturnRequestsController`; the dev-only OpenAPI document is `AllowAnonymous()`.
+- `GoogleAuthOptions` is bound with `ValidateDataAnnotations().ValidateOnStart()`, so a missing client ID or empty allowlist crashes the app at boot.
+- Real values stay out of git (both repos are public): `dotnet user-secrets` for `dotnet run`, a gitignored `.env` in `distributed_crm_infra` for Compose (`.env.example` committed). Compose uses `${VAR:?message}`, so a missing value stops `docker compose up` immediately.
+- Domain, Application, Infrastructure and `worker` are untouched — token validation is an HTTP-pipeline concern.
+
+**Verified live** against the containerized stack:
+- No token → `401`, `WWW-Authenticate: Bearer`.
+- Garbage token → `401`, `WWW-Authenticate: Bearer error="invalid_token"`.
+- Real Google ID token from the OAuth Playground → `200` with the list.
+- Create with the token → `201` `Pending` → worker → `Approved` about 1.2s later, so the outbox → RabbitMQ → worker path is unaffected.
+
+**Not verified live** (James chose to skip; understood conceptually): a tampered token (signature mismatch → `401`), a valid token whose email isn't allowlisted (→ `403`, the deny branch of `AllowedEmailHandler`), and an expired token (→ `401`, after `exp` + the 5-minute default clock skew).
+
+**Log noise fixed along the way**, in both `be` and `worker`:
+- `Microsoft.EntityFrameworkCore.Database.Command` raised to `Warning` — the outbox poller was logging one SQL statement per second. Verified: 0 `Executed DbCommand` lines after rebuild.
+- `Gss Encryption Mode=Disable` added to every Postgres connection string — Npgsql was trying GSS/Kerberos encryption on first connect and printing `Cannot load library libgssapi_krb5.so.2` from the slim runtime image. Verified: 0 occurrences after rebuild in `be`; `worker` hadn't connected to Postgres again yet at the time of checking (same Npgsql version and keyword as `be`).
+- The DataProtection "keys not persisted / no XML encryptor" warnings are left as-is on purpose — see `decisions.md`.
+
+**Old dev data, not a bug:** seven rows stuck at `Pending`/`Processing` (ORD-2000 ×2, ORD-3000, ORD-9000, ORD-1001, ORD-FAIL-001, ORD-DOCKER-001) all predate the transactional outbox and have no `outbox_messages` row. `ORD-FAIL-001` is the deliberate Phase 4 DLQ test.
+
+## Phase 7 — Azure Service Bus replaces RabbitMQ — not started
+
+## Phase 8 — Deploy readiness + OpenTelemetry — not started
+
+## Phase 9 — Bicep infrastructure — not started
+
+## Phase 10 — GitHub Actions pipeline + first live deploy — not started
+
+## Phase 11 — React + Ant Design frontend on Static Web Apps — not started
+
+## Phase 12 — Blob Storage attachment — not started
+
+## Phase 13 — Python ingestion job — not started
+
+## Phase 14 — Paste-a-phone-number search — not started
+
+## Phase 15 — Load testing with k6 — not started
 
 ## Other repos
 
-- `distributed_crm_fe` — default Vite scaffold only, no app code.
+- `distributed_crm_fe` — default Vite scaffold only, no app code until Phase 11.
 
 ## Repo split: `distributed_crm_infra`
 
@@ -104,3 +144,4 @@ All 7 were fixed and re-verified live against the containerized stack.
 - `distributed_crm_worker`: first commit made 2026-10-13 (`d12e17e`), covers the full consumer side of Phase 4. Pushed to GitHub.
 - `distributed_crm_fe`: never committed. Deliberately left as-is — no app code yet.
 - `distributed_crm_infra`: first commit made 2026-10-14, holds `docker-compose.yml` and `docs/`. Pushed to GitHub, public, under `jamesphm04`.
+- Phase 6 changes `be`, `worker` (log level + connection string only) and `infra`.

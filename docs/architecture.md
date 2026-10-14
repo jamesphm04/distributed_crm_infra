@@ -10,12 +10,12 @@ distributed_crm_be       ASP.NET Core API — Clean Architecture (Domain/Applica
 distributed_crm_worker   ASP.NET Core Worker Service — consumes the queue, calls a simulated flaky third-party API
 distributed_crm_fe       React + TypeScript (Vite), linted with Oxlint
 
-Postgres   — system of record, one table (`return_requests`)
+Postgres   — system of record: `return_requests`, plus `outbox_messages`
 Redis      — idempotency store + read-through cache
 RabbitMQ   — async handoff from API to worker, with a retry/DLX topology
 ```
 
-All three backing services run via `docker-compose.yml` at the section root. Port mappings are in `setup.md`.
+All three backing services, plus `be` and `worker`, run via `docker-compose.yml` in this repo. Port mappings are in `setup.md`.
 
 ## Domain
 
@@ -36,14 +36,34 @@ Fields: `Id` (GUID v7), `OrderReference`, `CustomerEmail`, `Item`, `Reason`, `St
 
 ## API surface (`distributed_crm_be`)
 
+Every endpoint requires `Authorization: Bearer <Google ID token>` from an allowlisted email — see "Authentication" below.
+
 | Endpoint | Notes |
 |---|---|
-| `POST /api/return-requests` | Requires `Idempotency-Key` header. Creates the record, publishes a `created` event to RabbitMQ. |
+| `POST /api/return-requests` | Requires `Idempotency-Key` header. Creates the record and an `outbox_messages` row in one transaction; the outbox relay publishes the `created` event to RabbitMQ. |
 | `GET /api/return-requests/{id}` | Cache-aside read through Redis. |
 | `GET /api/return-requests?page=&pageSize=` | Paginated list, no caching. |
 | `POST /api/return-requests/{id}/cancel` | Optimistic concurrency (`xmin` token) + state-machine guard, both map to `409`. |
 
-Clean Architecture layering: `Domain` has zero external dependencies; `Application` defines the ports (`IReturnRequestRepository`, `IUnitOfWork`, `IIdempotencyStore`, `IReturnRequestCache`, `IReturnRequestQueue`) and the use-case handlers; `Infrastructure` implements those ports against Postgres/Redis/RabbitMQ; `Api` wires DI and exposes controllers.
+Clean Architecture layering: `Domain` has zero external dependencies; `Application` defines the ports (`IReturnRequestRepository`, `IUnitOfWork`, `IIdempotencyStore`, `IReturnRequestCache`, `IReturnRequestQueue`) and the use-case handlers; `Infrastructure` implements those ports against Postgres/Redis/RabbitMQ; `Api` wires DI, handles authentication/authorization, and exposes controllers.
+
+## Authentication (Google ID tokens)
+
+The API is a JWT bearer resource server; Google is the identity provider. There's no login endpoint and no `users` table.
+
+```
+client ──(Sign in with Google / OAuth Playground)──▶ Google ──▶ ID token (JWT, ~1h)
+client ──Authorization: Bearer <ID token>──▶ be
+   UseAuthentication   JwtBearer: signature (Google JWKS), iss, aud = client ID, exp   ── fail ─▶ 401
+   UseAuthorization    policy: authenticated + AllowedEmailRequirement               ── fail ─▶ 403
+                         AllowedEmailHandler: email_verified && email ∈ GoogleAuth:AllowedEmails
+   controller
+```
+
+- Code lives in `DistributedCrm.Api/Authentication/` (`GoogleAuthOptions`, `AllowedEmailRequirement`, `AllowedEmailHandler`) and is wired in `Program.cs`. Domain, Application and Infrastructure have no auth code.
+- The allowlist policy is both the default and the fallback authorization policy, so any endpoint without `[AllowAnonymous]` is protected. Only the dev OpenAPI document is anonymous.
+- Config: `GoogleAuth:ClientId` and `GoogleAuth:AllowedEmails` (validated at startup). Values come from user secrets or `distributed_crm_infra/.env`, never from git.
+- `worker` has no auth — it never receives HTTP requests.
 
 ## Statelessness
 
@@ -72,7 +92,7 @@ Key format: `returnrequest:{id}`.
 
 ## Queue + retry topology (RabbitMQ)
 
-`RabbitMqReturnRequestQueue` implements `IReturnRequestQueue`. Producer side only, currently — the worker consumer isn't built yet (see `progress.md`).
+`RabbitMqReturnRequestQueue` implements `IReturnRequestQueue`, published to by the outbox relay (`OutboxPublisherBackgroundService`); `ReturnRequestConsumer` in `distributed_crm_worker` consumes. Phase 7 replaces this with Azure Service Bus.
 
 Three-exchange retry/DLX pattern (avoids needing the delayed-message-exchange plugin):
 
@@ -108,11 +128,11 @@ Exchange: return-requests ────▶ Queue: return-requests.process  ◄─
 
 Message payload is just `{ returnRequestId }` — the worker re-fetches current state from Postgres rather than trusting a possibly-stale embedded payload.
 
-Topology is declared idempotently by `RabbitMqReturnRequestQueue.DeclareTopologyAsync`, called once at API startup (forced via `app.Services.GetRequiredService<IConnection>()` right after `builder.Build()`, since `AddSingleton` alone is lazy and won't run the factory until something resolves it). The worker will need to declare the same topology independently at its own startup.
+Topology is declared idempotently by `RabbitMqReturnRequestQueue.DeclareTopologyAsync`, called once at API startup (forced via `app.Services.GetRequiredService<IConnection>()` right after `builder.Build()`, since `AddSingleton` alone is lazy and won't run the factory until something resolves it). The worker declares the same topology independently at its own startup.
 
 ## `distributed_crm_worker` — current state
 
-Scaffolded (Domain/Application/Infrastructure/Worker projects) but empty — no domain or application code written yet. Per `decisions.md`, it will NOT share code with the API's Domain/Application projects.
+Built: `ReturnRequestConsumer` subscribes to `return-requests.process`, `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. Per `decisions.md`, it shares no code with the API's Domain/Application projects.
 
 ## `distributed_crm_fe` — current state
 

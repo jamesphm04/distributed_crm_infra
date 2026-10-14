@@ -105,3 +105,79 @@ An ADR-style log of the non-obvious choices made so far, and why. Ordered roughl
 **Decision:** both `be` and `worker` construct their `IConnectionMultiplexer` via `ConfigurationOptions.Parse(...)` with `AbortOnConnectFail = false`, instead of wrapping `ConnectionMultiplexer.Connect` in a manual retry-with-backoff loop (the pattern used for RabbitMQ's `IConnection`).
 
 **Why:** found live — `be`'s original Redis registration was a single blocking `ConnectionMultiplexer.Connect` call with no retry at all, the same startup-ordering gap already fixed for RabbitMQ and Postgres in Phase 5, just missed for Redis. `AbortOnConnectFail = false` is StackExchange.Redis's own idiomatic answer to this: the initial `Connect()` call won't throw even if Redis isn't reachable yet, and the multiplexer keeps retrying in the background on its own. A hand-rolled loop would just be reimplementing what the client already does correctly.
+
+## Rehearse every WCP component, on managed Azure services
+
+**Decision:** from Phase 6 on, this project gives every component of the WCP portal's target architecture at least one thin but real use: Google sign-in, Azure Service Bus, Container Apps, PostgreSQL Flexible Server, Managed Redis, Key Vault with managed identity, Application Insights, Container Registry, Bicep, GitHub Actions, a React + Ant Design frontend on Static Web Apps, Blob Storage, and a Python ingestion job on Container Apps Jobs.
+The original Phase 6 — self-hosted Postgres/Redis/RabbitMQ containers on AWS EC2 behind an ALB — is dropped.
+
+**Why:** this project is the rehearsal for WCP, so each component should be proven on the platform WCP will actually run on before the real build depends on it.
+WCP's other apps already run on Azure, and a one-developer team shouldn't patch its own brokers and databases in production.
+
+**Order:** local changes first (auth, Service Bus, deploy readiness), then the Azure foundation and pipeline, then each remaining component shipped through that pipeline.
+Deploying early means every later component goes out the same way it will in WCP.
+
+**What's given up:** hands-on server operations — patching VMs, running a broker yourself, configuring a load balancer by hand.
+RabbitMQ's three-exchange retry/DLX topology (Phase 4) stays as completed learning; Phase 7 maps the same design onto Service Bus's built-in max delivery count, dead-letter queue, and scheduled redelivery.
+
+
+## Google ID tokens validated by `AddJwtBearer`, allowlist as an authorization handler
+
+**Decision:** the API is a plain JWT bearer resource server with Google as the authority.
+Authentication (who are you?) is entirely `Microsoft.AspNetCore.Authentication.JwtBearer`; authorization (are you allowed in?) is a custom `AllowedEmailRequirement` + `AllowedEmailHandler`.
+No login endpoint, no sessions, no `users` table.
+
+**Why these specific settings:**
+- **Both issuer spellings** (`https://accounts.google.com` and `accounts.google.com`) — Google documents both as valid for ID tokens.
+- **Audience = our OAuth client ID** — this is what stops a Google ID token minted for any *other* app from working here.
+- **`MapInboundClaims = false`** — keeps Google's claim names (`email`, `email_verified`, `sub`) instead of rewriting them to `http://schemas.xmlsoap.org/...` URIs, so the handler reads the same names you see when decoding the token.
+- **`email_verified` must be `true`** — otherwise an unconfirmed Google account using someone else's address would pass the allowlist.
+- **JwtBearer configured via `AddOptions<JwtBearerOptions>().Configure<IOptions<GoogleAuthOptions>>(...)`**, not a lambda inside `AddJwtBearer(...)` — the lambda runs before DI exists and would need a second, unvalidated read of `IConfiguration`.
+- **The handler never calls `context.Fail()`** — not succeeding is the conventional denial; `Fail()` would veto even if another handler for the same requirement succeeded.
+
+**Secure by default:** the same policy is both the default policy (what bare `[Authorize]` means — otherwise it would only mean "any valid Google token", i.e. any Google user in the world) and the fallback policy (applies to any endpoint with no attribute at all).
+Public endpoints opt out explicitly with `AllowAnonymous` — the dev OpenAPI document now, `/health` in Phase 8.
+`[Authorize]` is still on the controller so the intent is visible where the code is read.
+
+**401 vs 403:** left to the framework. A failed policy with no authenticated user is a challenge (`401`, `WWW-Authenticate: Bearer`); with an authenticated user it's a forbid (`403`).
+
+**Config section named `GoogleAuth`, not `Authentication`:** ASP.NET Core reads its own `Authentication:` section (`DefaultScheme`, `Schemes:Bearer:*`); mixing our keys in there would be confusing.
+
+**Where WCP differs:** WCP additionally rejects tokens whose `hd` claim isn't its Workspace domain (one extra check in the handler), and replaces the allowlist with a `Users` table + roles (WCP ADR-006).
+
+## Real config values never go in either public repo
+
+**Decision:** `appsettings.json` only documents the shape of `GoogleAuth` with empty values.
+Real values come from `dotnet user-secrets` (for `dotnet run`) and a gitignored `distributed_crm_infra/.env` (for Compose), with `.env.example` committed as the template.
+
+**Why:** `distributed_crm_be` and `distributed_crm_infra` are both public on GitHub.
+The client ID isn't secret, but the allowlist holds a real work email; keeping both in the same place also matches Phase 8's "all config from environment variables".
+`ValidateOnStart()` plus Compose's `${VAR:?message}` make a missing value fail loudly at startup instead of turning into silent `401`/`403`s.
+
+## `Gss Encryption Mode=Disable` on every Postgres connection string
+
+**Decision:** every Npgsql connection string (Compose for `be` and `worker`, both `appsettings.Development.json`) ends with `Gss Encryption Mode=Disable`.
+
+**Why:** Npgsql tries GSS/Kerberos session encryption by default on first connect, which needs the native `libgssapi_krb5` library — not present in the slim .NET runtime images.
+It falls back to a normal connection, but prints `Cannot load library libgssapi_krb5.so.2` / `Error:` on every startup, which trains you to ignore errors.
+Nothing here uses Kerberos (password locally; TLS + password or Entra token on Azure), so disabling it states the truth.
+Installing `libgssapi-krb5-2` in the images was ruled out — it adds image size and attack surface to support a feature that's never used.
+
+**Carry forward:** the Azure connection string built in Phase 9/10 (Bicep / Key Vault) needs the same setting.
+
+## EF Core's per-command log raised to `Warning`
+
+**Decision:** `Microsoft.EntityFrameworkCore.Database.Command` is set to `Warning` in both apps' `appsettings.json`.
+
+**Why:** the outbox poller queries once a second, so at `Information` `be` logged ~86,000 SQL lines a day, burying the lines that matter (e.g. the allowlist handler's `Denied` warnings).
+At `Warning`, EF still logs failed and slow commands. In Phase 10 the same noise would also be billed per GB by Application Insights.
+
+## DataProtection startup warnings left alone
+
+**Decision:** the "keys stored in a directory that may not be persisted" and "No XML encryptor configured" warnings from `be` are not suppressed or fixed.
+
+**Why:** `AddAuthentication` registers ASP.NET Core DataProtection, which warms up a key ring at startup — but nothing in this API uses it.
+JwtBearer validates tokens with Google's public keys, not DataProtection, and there are no cookies or antiforgery tokens.
+Persisting keys to Redis/Blob would add infrastructure for nothing; silencing the category would hide the warning if something ever *does* start using DataProtection.
+
+**Revisit if:** anything starts using DataProtection (cookie auth, antiforgery, `IDataProtector`). With 2 replicas in Phase 10, keys must then be shared (Blob Storage + Key Vault is the Azure-conventional pair), or a value protected on one replica can't be read on the other.

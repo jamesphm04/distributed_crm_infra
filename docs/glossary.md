@@ -20,6 +20,26 @@ Terminology introduced while building this project, written as it was actually e
 
 **Atomic operation** — an operation that either fully happens or doesn't, with no way for another operation to observe or interleave with it halfway through. Redis's `SET NX` is atomic: "check if the key doesn't exist, then set it" happens as one indivisible step, closing races that a separate `EXISTS` + `SET` would leave open.
 
+## Authentication
+
+**Authentication vs authorization** — authentication answers "who are you?" (here: a valid Google ID token); authorization answers "are you allowed to do this?" (here: is your email on the allowlist). A failure of the first is a `401`, of the second a `403`.
+
+**OpenID Connect (OIDC)** — a standard identity layer on top of OAuth 2.0. "Sign in with Google" is OIDC: Google authenticates the user and hands the app an ID token saying who they are.
+
+**ID token vs access token** — an ID token is a statement *about the user* ("this is james@..., verified by Google"), meant for your own app. An access token is a key for calling *Google's* APIs (Gmail, Drive). This API validates ID tokens.
+
+**JWT (JSON Web Token)** — the format of the ID token: `base64url(header).base64url(payload).signature`. The payload is readable by anyone — it's encoded, not encrypted. What makes it trustworthy is the signature.
+
+**Claims** — the fields in a JWT's payload: `iss` (who issued it), `aud` (which app it's for), `exp` (expiry, Unix seconds), `email`, `email_verified`, `sub` (Google's stable user id), `hd` (Workspace domain, only on Workspace accounts).
+
+**JWKS (JSON Web Key Set)** — the public keys Google publishes for checking its tokens' signatures. Google signs with a private key only it has; anyone can verify with the public key. JwtBearer finds the JWKS through the discovery document at `https://accounts.google.com/.well-known/openid-configuration` and refreshes it when Google rotates keys.
+
+**Bearer token** — a token that grants access to whoever presents it ("the bearer"), sent as `Authorization: Bearer <token>`. Anyone who steals it can use it until it expires, which is why tokens are short-lived and never pasted into websites or chat.
+
+**Clock skew** — slack allowed when checking `exp`, because the issuer's and the server's clocks never agree exactly. JwtBearer's default is 5 minutes, so a token is still accepted for up to 5 minutes after its `exp`.
+
+**Default vs fallback authorization policy** — the default policy is what a bare `[Authorize]` means; the fallback policy applies to endpoints with no authorization attribute at all. Setting the fallback makes the API secure by default: a forgotten attribute means "locked", not "open".
+
 ## Redis
 
 **Redis** — an in-memory data store, running as its own separate server/container. Clients connect to it over the network, the same way they connect to a database — it is not embedded in the application process.
