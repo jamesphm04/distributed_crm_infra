@@ -62,10 +62,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     environment:
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword"
+      ConnectionStrings__Redis: "redis:6379"
       RabbitMq__Host: rabbitmq
 
 volumes:

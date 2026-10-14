@@ -81,3 +81,27 @@ An ADR-style log of the non-obvious choices made so far, and why. Ordered roughl
 **Why:** found live. `"5672:5672"` with no host IP binds to `0.0.0.0` — every network interface the host has, not just loopback. James's Mac has active Tailscale VPN tunnel interfaces (`utun0`–`utun10`), each its own network path into the machine. RabbitMQ's queue showed two consumers instead of one; the second connection's peer address (`167.82.48.223`) matched neither James's Tailscale-assigned address nor his real public IP — meaning something reached RabbitMQ's default `guest`/`guest` credentials through one of those non-loopback interfaces. RabbitMQ does restrict the `guest` user to loopback connections by default specifically to prevent "default creds reachable externally," but that check only looks at whether the connection arrived via `127.0.0.1` — a VPN tunnel interface doesn't count, so the protection never applied.
 
 **Lesson:** for a project meant to become a real SaaS template, backing infrastructure (DB, broker) should never be bound to a public-facing or VPN-facing interface, even for local dev — bind to loopback explicitly rather than relying on "well, nobody will connect to it." This is the simplest local analogue of why real deployments put this infrastructure in a private subnet rather than exposing it directly.
+
+## Transactional outbox for the create path, not a direct publish
+
+**Decision:** `CreateReturnRequestHandler` no longer calls `IReturnRequestQueue` directly. It writes a row to a new `outbox_messages` table in the same `SaveChangesAsync` as the `ReturnRequest` insert. A separate `OutboxPublisherBackgroundService` polls for unprocessed rows every second and does the actual RabbitMQ publish, retrying indefinitely on failure.
+
+**Why:** a DB write and a message-queue publish aren't one atomic operation — they're two different systems with no shared commit protocol. Found live: if the publish failed (RabbitMQ down, network blip) after the row had already committed, nothing would ever enqueue a message for it, and the row sat at `Pending` forever with no error anywhere. The transactional outbox is the standard, conventional fix: Postgres can make "real data + outbox row" atomic because they're both just inserts in one transaction; the publish itself becomes "eventually guaranteed" via the relay, not "best effort, and if it fails you're on your own."
+
+**Also ruled out:** a retry loop wrapped around the publish call itself. This wouldn't survive a process crash between the DB commit and the publish attempt — an in-memory retry dies with the process. The outbox row surviving in Postgres is what makes the guarantee durable across crashes, not just transient network blips.
+
+**Payload shape:** the outbox entry stores a plain `ReturnRequestId` column, not a serialized JSON blob. There's only one message type right now, so a typed column is simpler and safer than generic JSON (no case-sensitivity risk, type-checked) — a repeat of the Phase 4 camelCase/PascalCase bug isn't possible here. If a second message type is ever needed, generalize the outbox then, not preemptively.
+
+## Worker invalidates `be`'s Redis cache directly, by key convention, not shared code
+
+**Decision:** `worker` gets its own `IReturnRequestCacheInvalidator`/`RedisReturnRequestCacheInvalidator`, calling `KeyDeleteAsync("returnrequest:{id}")` directly against the same Redis instance, right after every status transition commits.
+
+**Why:** found live. `be`'s `GetById` cache (`decisions.md`, "Read cache" entry above) was only ever invalidated by `CancelReturnRequestHandler` inside `be` itself — `worker` had no mechanism to invalidate it at all, so any `GetById` call made shortly before the worker finished processing would keep returning a stale cached status for up to the full 5-minute TTL. Since status polling is the primary thing a client does with this endpoint, this wasn't a cosmetic edge case.
+
+**Why not shared code instead:** `worker` deliberately has no project reference to `be` (see "Worker does not share code with the API" above) — these are independently deployed repos. The fix keeps that boundary: `worker` only knows the cache *key format* as a convention (documented in both files), never `be`'s actual cache implementation or response shape.
+
+## `AbortOnConnectFail = false`, not a hand-rolled retry loop, for Redis startup resilience
+
+**Decision:** both `be` and `worker` construct their `IConnectionMultiplexer` via `ConfigurationOptions.Parse(...)` with `AbortOnConnectFail = false`, instead of wrapping `ConnectionMultiplexer.Connect` in a manual retry-with-backoff loop (the pattern used for RabbitMQ's `IConnection`).
+
+**Why:** found live — `be`'s original Redis registration was a single blocking `ConnectionMultiplexer.Connect` call with no retry at all, the same startup-ordering gap already fixed for RabbitMQ and Postgres in Phase 5, just missed for Redis. `AbortOnConnectFail = false` is StackExchange.Redis's own idiomatic answer to this: the initial `Connect()` call won't throw even if Redis isn't reachable yet, and the multiplexer keeps retrying in the background on its own. A hand-rolled loop would just be reimplementing what the client already does correctly.

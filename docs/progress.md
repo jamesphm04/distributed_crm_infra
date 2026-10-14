@@ -44,7 +44,46 @@ Phase numbers match the ordered learning goals in `CLAUDE.md`. Last updated 2026
 - **Security incident found and fixed during live testing:** `docker-compose.yml`'s `ports:` entries (`"5672:5672"` etc., no host IP given) bind to `0.0.0.0` — every network interface on the host, not just loopback. On James's Mac, that includes active Tailscale VPN tunnel interfaces. A RabbitMQ queue was found with two consumers instead of one; the second connection's peer address (`167.82.48.223`) matched neither James's Tailscale address nor his real public IP, confirming it was not one of his own devices. Default `guest`/`guest` credentials were reachable through a non-loopback path, bypassing RabbitMQ's own loopback-only restriction on the `guest` user. **Fixed by binding every published port explicitly to `127.0.0.1`** (e.g. `"127.0.0.1:5672:5672"`) in all four services (`postgres`, `redis`, `rabbitmq`, `be`) — verified via `lsof` that every listening socket is loopback-only afterward.
 - Verified live end-to-end, fully containerized: created a return request via the containerized `be`, watched the containerized `worker` process it via the containerized Postgres/RabbitMQ, landed on `Approved`.
 
-## Phase 6 — AWS EC2 deployment — not started
+## Pre-deployment hardening — done, verified end-to-end
+
+A full code review of both `be` and `worker`, requested before moving on to Phase 6, surfaced 7 real bugs.
+All 7 were fixed and re-verified live against the containerized stack.
+
+1. **`GetById` could serve a stale cached status for up to 5 minutes.**
+   `worker` writes `Processing`/`Approved`/`Rejected` straight to Postgres and never invalidated `be`'s Redis cache.
+   Fixed by adding `IReturnRequestCacheInvalidator`/`RedisReturnRequestCacheInvalidator` to `worker`, called right after every `SaveChangesAsync` in `ProcessReturnRequestHandler`.
+   It shares no code with `be` — just the same Redis key format (`returnrequest:{id}`), documented as the one coupling point between the two repos.
+   Verified live via `redis-cli monitor`: the worker's `UNLINK` fires within ~150ms of each commit.
+
+2. **The create path wasn't atomic — a `ReturnRequest` row could get stuck at `Pending` forever.**
+   `CreateReturnRequestHandler` committed the row, then published to RabbitMQ as a separate step; if the publish failed, the row was orphaned with no recovery path.
+   Fixed with a transactional outbox: a new `outbox_messages` table (`OutboxMessage`/`OutboxStore`/`IOutboxStore`) is written in the *same* `SaveChangesAsync` as the `ReturnRequest` insert, so both commit atomically.
+   A new `OutboxPublisherBackgroundService` polls unprocessed rows every second and does the actual publish, retrying indefinitely until it succeeds — the event's fate is durable in Postgres the moment the HTTP request returns.
+   See `decisions.md`.
+
+3. **A malformed message payload could wedge the entire queue.**
+   `JsonSerializer.Deserialize` in `ReturnRequestConsumer` wasn't inside the try/catch; with `prefetchCount: 1`, an unhandled deserialize failure would leave the message unacked and stall every message behind it.
+   Fixed by moving the deserialize into a try/catch and routing a null/malformed payload straight to the DLQ (no retry — a bad payload will never fix itself).
+
+4. **No input validation on create.** Added `[Required]`/`[MaxLength]`/`[EmailAddress]` to `CreateReturnRequestRequest`, matching the DB's actual column limits, so an over-length field is a clean `400` instead of an unhandled `500` from Postgres.
+
+5. **Unbounded pagination.** Added `[Range(1, int.MaxValue)]` on `page` and `[Range(1, 100)]` on `pageSize` in `ReturnRequestsController.List` — previously `page=0` threw a negative-`OFFSET` exception and `pageSize` had no upper bound at all.
+
+6. **Redis had no startup resilience, unlike RabbitMQ and Postgres.** `be`'s `ConnectionMultiplexer.Connect` was a single blocking call with no retry.
+   Fixed in both `be` and (newly, for fix 1) `worker` using `ConfigurationOptions.AbortOnConnectFail = false` — the idiomatic StackExchange.Redis fix, which keeps retrying in the background instead of throwing at startup.
+
+7. **Idempotency keys could get stuck `IN_PROGRESS` for 24h on a crash.**
+   Mostly resolved as a side effect of fix 2: the window between the DB commit and `StoreResultAsync` no longer includes a network call to an external broker, just two local calls, so the crash window is much smaller.
+   Residual risk accepted rather than engineered further — not worth a bigger fix for a learning project.
+
+**Also added:** structured logging in `ReturnRequestConsumer` — a nack-to-retry now logs a `warn` with the exception and return-request id, exhausting retries to the DLQ logs an `error`, and a malformed payload logs a `warn`. Previously all three were silent.
+
+**Verified live:** created several return requests against the rebuilt containerized stack; confirmed cache invalidation via `redis-cli monitor`, confirmed the outbox relay publishing via `be` logs, and confirmed the new consumer logging fires correctly on the simulated API's real ~30% failure rate (nack → retry → self-heal, no DLQ involvement).
+
+## Phase 6 — Azure deployment — not started
+
+- Switched from AWS EC2 + ALB to Azure on 2026-10-14, to match where the WCP portal plans to host.
+- Postgres moves from a self-hosted container to Azure Database for PostgreSQL Flexible Server for this phase; Redis, RabbitMQ, and the app containers stay self-hosted on VMs.
 
 ## Phase 7 — Load testing (k6/Locust) — not started
 
