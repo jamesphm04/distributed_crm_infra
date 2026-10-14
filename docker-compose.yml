@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: distributed-crm-postgres
+    environment:
+      POSTGRES_DB: distributed_crm
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "127.0.0.1:5436:5432"
+    volumes:
+      - distributed-crm-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: distributed-crm-redis
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: distributed-crm-rabbitmq
+    ports:
+      - "127.0.0.1:5672:5672" # AMQP protocol
+      - "127.0.0.1:15672:15672" # management UI = http://localhost:15672 (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+  
+  be:
+    build: ../distributed_crm_be
+    container_name: distributed-crm-be
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5214:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword"
+      ConnectionStrings__Redis: "redis:6379"
+      RabbitMq__Host: rabbitmq
+
+  worker:
+    build: ../distributed_crm_worker
+    container_name: distributed-crm-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword"
+      RabbitMq__Host: rabbitmq
+
+volumes:
+  distributed-crm-pgdata:
+    name: distributed_crm_distributed-crm-pgdata
+
