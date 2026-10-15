@@ -61,10 +61,12 @@ Both repos involved are public, so these values never go into git.
    - Postgres: `5436` → `5432`
    - Redis: `6380` → `6379`
    - Service Bus emulator: `5672` → `5672` (AMQP), `5300` → `5300` (health: `curl http://localhost:5300/health`). Takes ~30s to become healthy; the apps retry until it is. Its SQL Edge storage container publishes no ports.
+   - Aspire dashboard (traces, metrics, logs): UI at http://localhost:18888, OTLP gRPC on `4317` → `18889`. No login locally. It keeps everything in memory, so restarting it clears all telemetry.
    Migrations run automatically: the one-shot `migrate` service applies the idempotent SQL script from the `be` image before `be` and `worker` start, and then shows as `Exited (0)` in `docker compose ps -a`.
    Check what's applied with `docker compose exec postgres psql -U postgres -d distributed_crm -c 'select migration_id from "__EFMigrationsHistory"'`.
 4. Check both apps are up: `curl -i http://localhost:5214/health/ready` (API) and `curl -i http://localhost:5216/health/ready` (worker) → `200 Healthy` (Postgres, Redis and Service Bus all reachable). `/health/live` only says the process is running.
 5. Get an ID token and make a request — see "Getting a Google ID token" below.
+6. Open http://localhost:18888 → **Traces**. A `POST /api/return-requests` shows up as one trace across `be` and the worker, including the worker's retries, within about 15 s.
 
 ## Running the API with `dotnet run` instead
 
@@ -139,3 +141,6 @@ curl -i -X POST http://localhost:5214/api/return-requests \
 - The Compose project is pinned as `distributed_crm` (`name:` in `docker-compose.yml`). Images built before that are named `distributed_crm_infra-*` and are no longer used: `docker image rm distributed_crm_infra-be distributed_crm_infra-worker distributed_crm_infra-migrate`. If you ever change `name:` again, run `docker compose down` first, or the old containers become orphans that block the fixed `container_name`s.
 - `.dockerignore` patterns are case-sensitive even though macOS file names aren't: `.DS_store` does not match `.DS_Store`.
 - `be` or `worker` not starting after a schema change → `docker compose logs migrate`. With `ON_ERROR_STOP=1` a failing migration exits non-zero, and Compose refuses to start the apps.
+- An app started with `dotnet run` sends telemetry to `localhost:4317` by default, which is the dashboard's published OTLP port, so it shows up next to the containers with no extra config. Set `Telemetry__ConsoleExporter=true` to also print spans and metrics to the console.
+- Redis spans appear in a trace about 10 s after the rest; refresh before deciding they are missing.
+- Pasting YAML into nvim with auto-indent can nest a key under the list above it (`ports.[2] is missing a target port`). Use `:set paste` before pasting, or paste with `"+p`.

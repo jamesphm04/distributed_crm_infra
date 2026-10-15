@@ -68,6 +68,16 @@ services:
       MSSQL_SA_PASSWORD: "DevPassword-123!"
       ACCEPT_EULA: "Y"
 
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:13.6.1
+    container_name: distributed-crm-aspire-dashboard
+    ports:
+      - "127.0.0.1:18888:18888" # UI
+      - "127.0.0.1:4317:18889" # OTLP gRPC, on the standard port so `dotnet run` finds it with no config
+    environment:
+      # Local only and bound to 127.0.0.1, so skip the login token and OTLP API key.
+      ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
+
   be:
     build: ../distributed_crm_be
     container_name: distributed-crm-be
@@ -87,6 +97,7 @@ services:
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword;Gss Encryption Mode=Disable"
       ConnectionStrings__Redis: "redis:6379"
       ConnectionStrings__ServiceBus: "Endpoint=sb://servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
       GoogleAuth__ClientId: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID in .env}
       GoogleAuth__AllowedEmails__0: ${ALLOWED_EMAIL:?set ALLOWED_EMAIL in .env}
 
@@ -108,6 +119,7 @@ services:
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword;Gss Encryption Mode=Disable"
       ConnectionStrings__Redis: "redis:6379"
       ConnectionStrings__ServiceBus: "Endpoint=sb://servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
 
 volumes:
   distributed-crm-pgdata:

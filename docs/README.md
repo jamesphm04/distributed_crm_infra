@@ -16,6 +16,7 @@ See [`../../CLAUDE.md`](../../CLAUDE.md) for the project conventions and the pha
 - [`architecture.md`](architecture.md) — how the system is built today: the repos, the backing services, the Service Bus queue and retry design, the Redis caching/idempotency design, Google sign-in, the Postgres schema.
 - [`decisions.md`](decisions.md) — an ADR-style log of *why* the non-obvious choices were made (claim-then-finalize idempotency, cache-aside + TTL + invalidation, the three-exchange retry/DLX pattern and its Service Bus mapping, why the worker doesn't share code with the API, how Google sign-in is validated).
 - [`progress.md`](progress.md) — phase-by-phase status against the learning goals in `CLAUDE.md`, kept current as work lands.
+- [`learning-gaps.md`](learning-gaps.md) — topics that were hard in quizzes, to revisit later, and which ones have since been resolved.
 - [`glossary.md`](glossary.md) — terminology introduced along the way (exchange, queue, DLX/DLQ, ack/nack, TTL, idempotency, cache-aside, JWT, JWKS, and so on), written for someone new to distributed systems.
 
 ## Where this lives

@@ -15,7 +15,7 @@ Redis      — idempotency store + read-through cache
 Service Bus — async handoff from API to worker (Azure Service Bus; the official emulator locally), with scheduled retries and a dead-letter queue
 ```
 
-All three backing services (plus the emulator's private SQL Edge container), and `be` and `worker`, run via `docker-compose.yml` in this repo. Port mappings are in `setup.md`.
+All three backing services (plus the emulator's private SQL Edge container), `be`, `worker` and the Aspire dashboard run via `docker-compose.yml` in this repo. Port mappings are in `setup.md`.
 
 ## Domain
 
@@ -90,6 +90,35 @@ Container Apps ingress ──HTTPS terminated, X-Forwarded-For/-Proto added─�
 - **Images.** Both are multi-stage: `sdk:10.0` builds, `aspnet:10.0` runs. The runtime stage runs as the non-root `app` user (UID 1654), listens on 8080, and starts as `tini -- dotnet <app>.dll`, so `tini` is PID 1 and the app is its child. `.dockerignore` keeps `bin/`, `obj/`, `.git/` and `.env` out of the build context. `be`'s Dockerfile has two more stages, `migrations-script` and `migrate`.
 - **Compose project** is pinned as `distributed_crm`, so images are `distributed_crm-be`, `distributed_crm-worker` and `distributed_crm-migrate`, and the network is `distributed_crm_default`.
 
+## Telemetry (OpenTelemetry)
+
+```
+be, worker ──OTLP gRPC (OTEL_EXPORTER_OTLP_ENDPOINT)──▶ Aspire dashboard (local, in memory)  /  Application Insights (Phase 9+)
+             traces + metrics + logs, service.name = distributed-crm-be | distributed-crm-worker
+```
+
+- Each app wires OpenTelemetry in one place, `Telemetry/TelemetryExtensions.AddTelemetry()` in its host project; the two copies differ only in service name and instrumentation list.
+- **Traces** come from library instrumentation (ASP.NET Core, HttpClient in `be`, Npgsql, StackExchange.Redis, the Service Bus SDK) plus the `DistributedCrm.Infrastructure` `ActivitySource` in each repo's Infrastructure (`Telemetry/InfrastructureTelemetry.cs`), which is plain `System.Diagnostics` so Infrastructure has no OpenTelemetry dependency.
+- **Metrics:** ASP.NET Core, HttpClient (`be`), runtime and Npgsql. **Logs:** every `ILogger` record, carrying the current trace ID.
+- **Not traced:** `/health/*` requests (and so their checks' child spans), SQL commands and batches with no current span (the outbox poll), and `be`'s physical connection opens.
+
+**One trace from the API to the worker:**
+
+```
+POST /api/return-requests (be)
+  INSERT return_requests + outbox_messages (trace_parent = Activity.Current.Id)
+  ┊ ~1 s, background loop
+  outbox relay ReturnRequestCreated (be; parent restored from trace_parent with ActivityContext.TryParse)
+    Message (Service Bus producer span; its ID travels in Diagnostic-Id)
+      ServiceBusProcessor.ProcessMessage (worker, one per attempt; failed attempts marked as errors)
+        SQL, Redis UNLINK, approval-api RequestDecision (hand-written client span), Schedule/Complete/DeadLetter
+    ServiceBusSender.Send
+    UPDATE outbox_messages
+```
+
+HTTP and Service Bus propagate trace context by themselves; the outbox table needs its `trace_parent` column, or the relay would start a new trace.
+Scheduled retries copy the original message's properties, so every attempt and the final dead-letter stay in the same trace.
+
 ## Statelessness
 
 The API tier holds no in-process state that matters across requests — every instance reads/writes the same Postgres and Redis. Verified live by running two instances on different ports (`5214`/`5215`) against one shared stack and confirming identical responses and shared idempotency/cache behavior from both. See `decisions.md` for what this specifically ruled out.
@@ -158,7 +187,7 @@ Phase 4's RabbitMQ three-exchange retry/DLX topology is gone from the code; see 
 
 ## `distributed_crm_worker` — current state
 
-Built: `ReturnRequestConsumer` (a hosted service on a `WebApplication` host that maps only the health endpoints) processes `return-requests` (see above), `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. Per `decisions.md`, it shares no code with the API's Domain/Application projects.
+Built: `ReturnRequestConsumer` (a hosted service on a `WebApplication` host that maps only the health endpoints) processes `return-requests` (see above), `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. It exports traces, metrics and logs as `distributed-crm-worker` (see Telemetry). Per `decisions.md`, it shares no code with the API's Domain/Application projects.
 
 ## `distributed_crm_fe` — current state
 

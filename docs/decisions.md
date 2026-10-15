@@ -345,3 +345,59 @@ The health-check classes are copied from `be`, not shared, per the no-shared-cod
 .NET ends an unhandled crash with `abort()`, so its `SIGABRT` was dropped and the process spun at ~100% CPU instead of exiting; verified live, and verified fixed by `docker run --init`.
 `tini` makes the app an ordinary child process, exits with its exit code (`134` for an abort), forwards `SIGTERM` for graceful shutdown, and reaps zombie processes.
 It is baked into the image rather than relying on `docker run --init`, because Container Apps has no equivalent option.
+
+## OTLP to the Aspire dashboard locally, console exporter only on request
+
+**Decision:** both apps export traces, metrics and logs with `UseOtlpExporter()`.
+Locally they send to the .NET Aspire dashboard container; `Telemetry:ConsoleExporter=true` adds a console exporter for traces and metrics.
+
+**Why:** OTLP is the vendor-neutral protocol every backend accepts, so Phase 9 changes `OTEL_EXPORTER_OTLP_ENDPOINT` (and its auth), not the instrumentation.
+A console exporter alone prints one span at a time and can't show a trace as a tree across two services, which is the point of Step 11.
+The dashboard is one container, keeps everything in memory, and also shows metrics and logs linked to traces.
+Neither app `depends_on` it: if it is down, the exporter drops data after a timeout and the apps keep serving.
+
+## Telemetry wiring lives in each host project; Infrastructure uses plain `ActivitySource`
+
+**Decision:** the OpenTelemetry packages and `AddTelemetry()` are only in `DistributedCrm.Api` and `DistributedCrm.Worker`.
+Spans written by our own code use a `System.Diagnostics.ActivitySource` (`InfrastructureTelemetry`, named `DistributedCrm.Infrastructure`) that the host subscribes to.
+
+**Why:** choosing exporters and instrumentation is composition-root work, like DI.
+`ActivitySource` is part of .NET itself, so Infrastructure can emit spans without depending on OpenTelemetry, which is exactly how the libraries we instrument (Npgsql, the Azure SDK) do it.
+Each repo has its own copy of the extension and the source, per the no-shared-code rule.
+
+## Service name in code, endpoint in the environment
+
+**Decision:** `service.name` is set with `AddService(TelemetryExtensions.ServiceName)`; the export endpoint comes from the standard `OTEL_EXPORTER_OTLP_ENDPOINT` variable.
+
+**Why:** the service name describes the code and must be identical in every environment, so App Insights' cloud role name never drifts.
+The endpoint describes the environment.
+`AddService` overrides `OTEL_SERVICE_NAME`, so that variable is not set anywhere, to avoid configuration that looks meaningful but isn't.
+
+## Trace only what is part of a story
+
+**Decision:** no traces for `/health/*`; Npgsql traces a command or batch only when `Activity.Current` is set; `be` does not trace physical connection opens.
+Metrics still count everything.
+
+**Why:** platform probes and the outbox relay's once-a-second poll produced almost all traces (187 of ~200), each a one-span trace that buries real requests and is billed per GB in Application Insights.
+Filtering the ASP.NET Core request also drops the health checks' child spans, because the default sampler follows the parent's decision.
+Npgsql has no filter for physical opens, and the pool reopening its idle connection made a root span every 5 minutes, so `be` turns them off; the worker keeps them, because there every open happens inside a message's span, where it explains a slow first query.
+The Service Bus SDK's `ServiceBusReceiver.Receive` root span is kept: it is one per received message, not per poll, and it is the standard view of receive latency.
+
+## The outbox stores the request's `traceparent`; the relay continues that trace
+
+**Decision:** `outbox_messages.trace_parent` (nullable `varchar(55)`) holds `Activity.Current.Id` from the request that wrote the row.
+The relay restores it with `ActivityContext.TryParse` as the parent of an `outbox relay {MessageType}` span around the send and the `UPDATE`.
+
+**Why:** HTTP headers and Service Bus properties carry trace context automatically, but a table only carries what it has a column for, so the relay used to start a new trace for every message.
+Parent-child, rather than a span link to the request, gives one trace from the click to the worker's result, and fits because each row maps to one message and the delay is about a second; links suit batch consumers and long delays.
+The column is nullable so rows written before the migration (or outside any trace) still work, and the migration only adds a column, so it can run before the new image rolls out (expand first).
+Application's `IOutboxStore` is unchanged: capturing the context is how Infrastructure stores the row.
+
+## Redis instrumentation is a beta built against SE.Redis 2.x
+
+**Decision:** `OpenTelemetry.Instrumentation.StackExchangeRedis` 1.19.0-beta.1 is used with StackExchange.Redis 3.3.0.
+
+**Why:** it is the only Redis instrumentation for .NET; it builds and restores cleanly against 3.3 and was verified live (cache miss `GET` → `SELECT` → `SETEX`, cache hit `GET` only).
+Its spans arrive about 10 s late because it drains profiling sessions in batches.
+
+**Revisit if:** a stable release appears, or an SE.Redis upgrade stops Redis spans appearing.

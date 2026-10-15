@@ -133,11 +133,12 @@ Also checked: a worker started with `dotnet run` (Development config) attached i
 - Emulator rejects a duplicate-detection window over 5 minutes and refuses to start (`Expected time to be less than or equal to 5m`).
 - Phase 4's consumer treated `{}` as a valid message for `Guid.Empty` and acked it away as "not found"; the new consumer dead-letters it.
 
-## Phase 8 — Deploy readiness + OpenTelemetry — in progress
+## Phase 8 — Deploy readiness + OpenTelemetry — done, verified end-to-end
 
-James writes the code this phase, step by step; each step is reviewed and then verified by him against the Compose stack.
+James wrote Steps 1–6 and 9a–9c step by step, each reviewed and then verified by him against the Compose stack.
+At his request the agent built Steps 7–8, 9d, 10 and 11, verified them, and showed him the result.
 
-**Done so far (`be`, `worker` + `infra`):**
+**Built (`be`, `worker` + `infra`):**
 - **Step 1–3, health endpoints on `be`:** `/health/live` runs no checks; `/health/ready` checks Postgres (`AddDbContextCheck`), Redis (`RedisHealthCheck`, a ping through the app's multiplexer) and Service Bus (`ServiceBusQueueHealthCheck`, a peek through the app's client, registered as a singleton so it holds one receiver link). Both are `AllowAnonymous`; every check is capped at 5 seconds.
 - **Step 4, forwarded headers:** `UseHttpsRedirection` removed; `UseForwardedHeaders` (`X-Forwarded-For` + `X-Forwarded-Proto`, any proxy trusted, `ForwardLimit` 1) is the first middleware.
 - **Step 5, migrations as an idempotent SQL script:** `dotnet-tools.json` pins `dotnet-ef` 10.0.12. The `be` Dockerfile gained a `migrations-script` stage (`dotnet ef migrations script --idempotent`) and a `migrate` stage (`postgres:17` + the script, `psql -v ON_ERROR_STOP=1`). Compose runs `migrate` as a one-shot job; `be` and `worker` wait for `service_completed_successfully`.
@@ -145,6 +146,18 @@ James writes the code this phase, step by step; each step is reviewed and then v
 - **Step 7, env-only config, failing fast:** both apps read their three connection strings through `GetRequiredConnectionString` before building the host, so a missing one stops startup with the variable's name. `be` gained `DistributedCrmDbContextFactory` (design-time), so the EF tools no longer run `Program.cs` and no longer depend on `appsettings.Development.json`.
 - **Step 8, worker health:** the worker moved to the Web SDK and `WebApplication`, and exposes the same `/health/live` and `/health/ready` (Postgres, Redis, Service Bus) on port 8080, published on `127.0.0.1:5216`. It has no other HTTP surface.
 - **tini as PID 1:** both runtime images install `tini` and start with `ENTRYPOINT ["tini", "--", "dotnet", …]` (see Bugs found).
+- **Step 9, OpenTelemetry in `be`:** `Telemetry/TelemetryExtensions.AddTelemetry()` exports traces, metrics and logs over OTLP with `UseOtlpExporter()`.
+  Traces come from ASP.NET Core, HttpClient, Npgsql, StackExchange.Redis and the Service Bus SDK (`Azure.Experimental.EnableActivitySource` switch + `AddSource("Azure.Messaging.ServiceBus.*")`).
+  Metrics come from ASP.NET Core, HttpClient, the runtime and Npgsql; logs go through `WithLogging`, so each record carries its trace ID.
+  `service.name` is set in code (`distributed-crm-be`); the endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT`; `Telemetry:ConsoleExporter=true` adds a console exporter.
+  Noise filters: no traces for `/health/*`; Npgsql traces commands and batches only when `Activity.Current` is set; physical connection opens are not traced.
+- **Aspire dashboard in Compose:** `mcr.microsoft.com/dotnet/aspire-dashboard:13.6.1`, UI on `127.0.0.1:18888`, OTLP gRPC on `127.0.0.1:4317` (so `dotnet run` needs no config), anonymous access because it is bound to localhost.
+  The apps don't `depends_on` it: telemetry must never decide whether an app starts.
+- **Step 10, OpenTelemetry in `worker`:** the same extension (`distributed-crm-worker`, no HttpClient instrumentation), its own `InfrastructureTelemetry` `ActivitySource`, a hand-written `approval-api RequestDecision` client span (error status and exception event on failure, `approval.decision` tag), and failed attempts marked as errors on the processor's span with a `messaging.attempt` tag.
+  The worker keeps tracing physical connection opens, because nothing in it runs SQL outside a message's span.
+- **Step 11, one trace from the API to the worker:** `outbox_messages.trace_parent` (nullable `varchar(55)`, migration `AddOutboxTraceParent`) stores `Activity.Current.Id` when the row is written.
+  The relay parses it with `ActivityContext.TryParse` and wraps each row's send and `UPDATE` in an `outbox relay ReturnRequestCreated` span with that parent; Service Bus then carries the trace to the worker in `Diagnostic-Id`.
+  Rows without a value start a new trace, as before.
 
 **Verified live:**
 - `/health/live` and `/health/ready` → `200 Healthy`; `/api/return-requests` without a token still `401`.
@@ -158,19 +171,33 @@ James writes the code this phase, step by step; each step is reviewed and then v
 - The worker still processes messages after the switch to a web host: an outbox-inserted request went through two simulated failures and scheduled retries to `Rejected`.
 - `docker compose stop worker` logs `Application is shutting down...` and exits `0`; `tini` is PID 1 with `dotnet` as its child.
 - `dotnet run` of the worker listens on `http://localhost:5216` in `Development`, `/health/ready` `200`.
+- Telemetry in the Aspire dashboard: logs linked to their traces; a cache miss shows Redis `GET` → `SELECT` → Redis `SETEX` and a cache hit shows only Redis `GET`, which confirmed the Redis beta instrumentation works on SE.Redis 3.3.
+- Idle for 5½ minutes (one full connection-pool prune cycle) plus repeated `/health/ready` calls on both apps → 0 traces.
+- A real `POST /api/return-requests` (James, trace `65f7ae2…`) is one trace across both services: the POST's SQL and Redis spans, the relay span about 1 s later, then the worker's attempts.
+  It hit the simulated failure twice, so two red attempts 30 s apart (each with a red approval-api span and a scheduled retry) and a successful third attempt all sit under the same POST.
+  The row's `trace_parent` starts with that trace ID.
+- An outbox row with a hand-written `trace_parent` continued that exact trace ID; a row without one started a new trace with the relay span as its root.
+- A retried message (two failures, then `Approved`) shows all three attempts in one trace; the retry inherits the trace because the scheduled copy keeps the original's application properties.
+- Final check after a full `docker compose up -d --build`: `migrate` `Exited (0)`, both apps' `/health/live` and `/health/ready` `200`, the API without a token `401`, EF reports no pending model changes, both builds 0 warnings.
 
 **Bugs found:**
 - **A crashing .NET app hung as PID 1 instead of exiting.** With the fail-fast check throwing, the container stayed `Up` with `dotnet` at ~100% CPU for over a minute. .NET ends a crash with `abort()`, which raises `SIGABRT` on itself, and the kernel drops signals with a default action for PID 1 of a PID namespace. The same image under `docker run --init` exited `134` at once. Fixed with `tini` as PID 1 in both images; in Container Apps the hang would have looked like a stuck replica instead of a crash-and-restart.
 - **The EF tools only worked because of `appsettings.Development.json`.** Without a design-time factory they built the app's host to get the `DbContext`, so they needed real connection strings at design time. Found when fail-fast config made them throw.
 - **`.dockerignore` had `**/.DS_store`.** Docker matches patterns case-sensitively, so it matched nothing; macOS's case-insensitive file system hid the typo.
+- **`AllowedEmailHandler` logged "Denied: token has no verified email" for expired or missing tokens.** ASP.NET Core runs every handler in a policy even after `RequireAuthenticatedUser()` fails, so the handler saw an anonymous user. Found through the dashboard's log-to-trace link; the handler now ignores unauthenticated users.
+- **The outbox poll made a one-span trace every second** (187 of ~200 traces in the dashboard), and the pool reopening its idle connection made a lone `CONNECT` trace every 300 s. Fixed by the Npgsql command, batch and physical-open settings above.
 
 **Gotchas found:**
 - `psql` prints only `DO` for each guarded block of the idempotent script, whether it applied a migration or skipped it — check `__EFMigrationsHistory`, not the log.
 - The `UseHttpsRedirection` warning `Failed to determine the https port for redirect` was logged on every request in the container; gone with Step 4.
 - The Compose project had to be brought `down` *before* setting `name:`. Compose owns containers by the `com.docker.compose.project` label, so after a rename it no longer sees the old ones; with fixed `container_name`s, the next `up` would fail on a name conflict.
 - The rename left the old images (`distributed_crm_infra-be`, `-worker`, `-migrate`, and `distributed-crm-migrate`) behind; they are unused and can be removed with `docker image rm`.
+- `AddService(...)` in code overrides `OTEL_SERVICE_NAME`, so the variable was removed from Compose rather than left looking meaningful.
+- Redis spans reach the dashboard about 10 s after the rest of a trace, because the instrumentation drains its profiling sessions in batches.
+- The Service Bus SDK's `ServiceBusReceiver.Receive` span is a root span, one per received message (not per poll). It is kept as the standard view of receive latency.
+- Pasting YAML into nvim with auto-indent turned `environment:` into a list item under `ports:` (`ports.[2] is missing a target port`); use `:set paste` or `"+p`.
 
-**Remaining:** OpenTelemetry (traces, metrics, logs) in `be` (Step 9) and `worker` (Step 10), then one trace from the API through the outbox and Service Bus to the worker (Step 11), and the phase's final end-to-end check (Step 12).
+**Not verified here:** export to Application Insights (Phase 9 changes only the OTLP endpoint and its auth).
 
 ## Phase 9 — Bicep infrastructure — not started
 
@@ -206,4 +233,5 @@ James writes the code this phase, step by step; each step is reviewed and then v
 - Phase 6 changes `be`, `worker` (log level + connection string only) and `infra`.
 - Phase 7 changes `be`, `worker` and `infra`.
 - Phase 8 checkpoint (Steps 1–5) committed in `be` and `infra` on 2026-10-15; the phase isn't done yet.
-- Phase 8 Steps 6–8 committed in `be`, `worker` and `infra` on 2026-10-15; OpenTelemetry is still to come.
+- Phase 8 Steps 6–8 committed in `be`, `worker` and `infra` on 2026-10-15.
+- Phase 8 Steps 9–11 (OpenTelemetry) committed in `be`, `worker` and `infra` on 2026-10-15, completing the phase.

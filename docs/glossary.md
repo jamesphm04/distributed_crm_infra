@@ -96,6 +96,46 @@ Terminology introduced while building this project, written as it was actually e
 
 **`ServiceBusProcessor`** — the SDK's push-style consumer: it receives, renews locks, runs your handler with bounded concurrency, and reconnects on errors. You only write the per-message handler.
 
+## Telemetry (OpenTelemetry)
+
+**Telemetry** — data a running app emits about itself (logs, metrics, traces) so you can work out afterwards what happened, without a debugger.
+
+**Logs / metrics / traces** — the three signals. Logs say what happened in words; metrics are pre-aggregated numbers (counts, durations, percentiles), cheap at any volume; traces show what one request did, step by step, across services.
+
+**Span** — one timed operation: a name, start, duration, kind, attributes, status, and a parent. In .NET a span is a `System.Diagnostics.Activity`.
+
+**Trace** — a tree of spans sharing one trace ID, usually one request from start to finish.
+
+**Root span** — a span with no parent, so it starts a new trace. Background work with no current span (like the outbox poll) makes every one of its spans a root.
+
+**`Activity.Current`** — the span running right now on this async flow. New spans become its children.
+
+**`ActivitySource`** — what code uses to create spans (`StartActivity`). Libraries and our Infrastructure each have one; OpenTelemetry subscribes to them by name.
+
+**Span kind** — `Server` (someone called me), `Client` (I called someone), `Producer`/`Consumer` (I sent/received a message), `Internal` (work inside the process).
+
+**Attribute (tag)** — a key/value detail on a span, e.g. `db.query.text`, `http.response.status_code`, `messaging.attempt`.
+
+**Resource** — labels on everything a process emits, mainly `service.name` and `service.instance.id`; the instance ID tells replicas apart.
+
+**Instrumentation** — code that creates spans and metrics for a library, e.g. `AddAspNetCoreInstrumentation()`.
+
+**Exporter** — sends telemetry somewhere: OTLP to a backend, or the console.
+
+**OTLP** — the OpenTelemetry Protocol, the vendor-neutral wire format every backend accepts. Switching backends changes an endpoint, not code.
+
+**Aspire dashboard** — a single container that receives OTLP and shows traces, metrics and logs in a browser, in memory. The local stand-in for Application Insights.
+
+**`traceparent`** — the W3C format that carries trace context across a hop: `00-<trace id>-<parent span id>-<flags>`, 55 characters. HTTP sends it as a header; Service Bus as the `Diagnostic-Id` property; the outbox stores it in `trace_parent`.
+
+**Context propagation** — passing `traceparent` along so the next service (or the relay) continues the same trace instead of starting a new one.
+
+**Sampling** — deciding which traces to keep. The default is parent-based: a child follows its parent's decision, so filtering a request also drops everything under it.
+
+**Span link** — a reference from one span to a span in another trace, used when one operation relates to many others (e.g. a batch). The alternative to parent-child that Step 11 did not use.
+
+**Expand-first migration** — a schema change that only adds (a nullable column, a new table), so old and new code both work against the new schema and the migration can run before the deploy.
+
 ## RabbitMQ (Phase 4, no longer in the code)
 
 **Message broker** — a system for transporting messages between processes (unlike a database, which stores queryable data). RabbitMQ delivers a message once and it's gone — there's no "GET a key" equivalent.
