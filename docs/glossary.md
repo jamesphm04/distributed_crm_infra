@@ -20,6 +20,18 @@ Terminology introduced while building this project, written as it was actually e
 
 **Atomic operation** — an operation that either fully happens or doesn't, with no way for another operation to observe or interleave with it halfway through. Redis's `SET NX` is atomic: "check if the key doesn't exist, then set it" happens as one indivisible step, closing races that a separate `EXISTS` + `SET` would leave open.
 
+**Liveness probe** — a platform's periodic "is this process stuck?" request. Failing it gets the container restarted, so it must not depend on anything outside the process. Here: `/health/live`.
+
+**Readiness probe** — a platform's periodic "can this replica serve requests right now?" request. Failing it takes the replica out of the load balancer until it passes again, without a restart. Here: `/health/ready`, which checks Postgres, Redis and Service Bus.
+
+**Reverse proxy / TLS termination** — a server in front of the app that receives the client's HTTPS connection, decrypts it, and forwards the request to the app over plain HTTP. Container Apps' ingress (like an AWS ALB) does this.
+
+**Forwarded headers** — `X-Forwarded-Proto` and `X-Forwarded-For`, added by a reverse proxy to carry the original scheme and client IP. `UseForwardedHeaders` reads them back into the request. Only safe to trust when the proxy is the only way in, because any client can send them too.
+
+**Idempotent migration script** — every EF migration in one SQL file, each wrapped in a check against `__EFMigrationsHistory`, so it applies only what's missing and can run against a database at any version, any number of times.
+
+**One-shot Compose service** — a service that runs a job and exits, like `migrate`. Others wait for it with `depends_on: condition: service_completed_successfully`, which requires exit code `0`.
+
 ## Authentication
 
 **Authentication vs authorization** — authentication answers "who are you?" (here: a valid Google ID token); authorization answers "are you allowed to do this?" (here: is your email on the allowlist). A failure of the first is a `401`, of the second a `403`.

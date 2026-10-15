@@ -36,7 +36,7 @@ Fields: `Id` (GUID v7), `OrderReference`, `CustomerEmail`, `Item`, `Reason`, `St
 
 ## API surface (`distributed_crm_be`)
 
-Every endpoint requires `Authorization: Bearer <Google ID token>` from an allowlisted email — see "Authentication" below.
+Every endpoint except `/health/*` requires `Authorization: Bearer <Google ID token>` from an allowlisted email — see "Authentication" below.
 
 | Endpoint | Notes |
 |---|---|
@@ -44,6 +44,8 @@ Every endpoint requires `Authorization: Bearer <Google ID token>` from an allowl
 | `GET /api/return-requests/{id}` | Cache-aside read through Redis. |
 | `GET /api/return-requests?page=&pageSize=` | Paginated list, no caching. |
 | `POST /api/return-requests/{id}/cancel` | Optimistic concurrency (`xmin` token) + state-machine guard, both map to `409`. |
+| `GET /health/live` | Anonymous. No checks: `200 Healthy` while the process can serve HTTP. |
+| `GET /health/ready` | Anonymous. Postgres, Redis and Service Bus: `200 Healthy` or `503 Unhealthy`. |
 
 Clean Architecture layering: `Domain` has zero external dependencies; `Application` defines the ports (`IReturnRequestRepository`, `IUnitOfWork`, `IIdempotencyStore`, `IReturnRequestCache`, `IReturnRequestQueue`) and the use-case handlers; `Infrastructure` implements those ports against Postgres/Redis/Service Bus; `Api` wires DI, handles authentication/authorization, and exposes controllers.
 
@@ -61,9 +63,24 @@ client ──Authorization: Bearer <ID token>──▶ be
 ```
 
 - Code lives in `DistributedCrm.Api/Authentication/` (`GoogleAuthOptions`, `AllowedEmailRequirement`, `AllowedEmailHandler`) and is wired in `Program.cs`. Domain, Application and Infrastructure have no auth code.
-- The allowlist policy is both the default and the fallback authorization policy, so any endpoint without `[AllowAnonymous]` is protected. Only the dev OpenAPI document is anonymous.
+- The allowlist policy is both the default and the fallback authorization policy, so any endpoint without `[AllowAnonymous]` is protected. Only the health endpoints and the dev OpenAPI document are anonymous.
 - Config: `GoogleAuth:ClientId` and `GoogleAuth:AllowedEmails` (validated at startup). Values come from user secrets or `distributed_crm_infra/.env`, never from git.
 - `worker` has no auth — it never receives HTTP requests.
+
+## Health, proxies and migrations (`be`)
+
+```
+Container Apps ingress ──HTTPS terminated, X-Forwarded-For/-Proto added──▶ be :8080
+   UseForwardedHeaders   restores the client's scheme + IP (any proxy trusted, ForwardLimit 1)
+   UseAuthentication / UseAuthorization
+   controllers           /api/return-requests…
+   health checks         /health/live  → no checks
+                         /health/ready → postgres (AddDbContextCheck), redis (ping), servicebus (peek)   5 s cap each
+```
+
+- Health-check classes live in `DistributedCrm.Infrastructure/HealthChecks/`; registration and endpoint mapping are in `Program.cs`. The responses carry only `Healthy`/`Unhealthy`; failures are logged with the exception.
+- There is no `UseHttpsRedirection`: HTTPS is enforced at the ingress.
+- **Migrations** never run inside the app. The `be` Dockerfile's `migrations-script` stage generates `dotnet ef migrations script --idempotent`; its `migrate` stage is `postgres:17` + that script, run with `psql -v ON_ERROR_STOP=1` and configured by `PG*` environment variables. In Compose it is a one-shot job that `be` and `worker` wait for (`service_completed_successfully`).
 
 ## Statelessness
 

@@ -15,6 +15,21 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build:
+      context: ../distributed_crm_be
+      target: migrate # the psql + migrate.sql stage, not the API image
+    container_name: distributed-crm-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: distributed_crm
+      PGUSER: postgres
+      PGPASSWORD: devpassword
+
   redis:
     image: redis:7
     container_name: distributed-crm-redis
@@ -53,6 +68,8 @@ services:
     build: ../distributed_crm_be
     container_name: distributed-crm-be
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -73,6 +90,8 @@ services:
     build: ../distributed_crm_worker
     container_name: distributed-crm-worker
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

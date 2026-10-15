@@ -231,3 +231,51 @@ With the emulator stopped while `be` was running, a new request stayed `Pending`
 **Decision:** `Azure.Core` and `Azure.Messaging.ServiceBus` are set to `Warning` in both apps.
 
 **Why:** at `Information` the SDK logs several lines per send/receive (link creation, operation start/complete). At `Warning`, a normal create → `Approved` cycle produces zero log lines, while connection problems still show up.
+
+## Liveness checks nothing; readiness checks every dependency
+
+**Decision:** `/health/live` runs zero checks (`Predicate = _ => false`).
+`/health/ready` runs the checks tagged `ready`: Postgres, Redis and Service Bus.
+
+**Why:** the platform restarts a container that fails liveness, and stops routing to one that fails readiness.
+A dependency check in liveness would turn a short Redis outage into every replica restarting at once, which doesn't fix Redis and adds an outage of its own.
+Verified live: with Redis stopped, liveness stayed `200` and readiness went `503`, then recovered without a restart.
+
+## Own health checks for Redis and Service Bus, through the app's own clients
+
+**Decision:** `RedisHealthCheck` pings through the app's `IConnectionMultiplexer`; `ServiceBusQueueHealthCheck` peeks the queue through the app's `ServiceBusClient`.
+Postgres uses EF Core's `AddDbContextCheck`.
+
+**Why:** a probe should test the connection requests actually use, not a fresh one.
+The `AspNetCore.HealthChecks.Redis` package is built against StackExchange.Redis 2.x (this project is on 3.3).
+The Service Bus check uses peek because it needs only Listen rights; the management API would need `Manage`, which the Phase 9 identities won't have.
+The Service Bus check is a DI singleton: the health-check system resolves registered instances instead of creating one per probe, so it holds one receiver link for the app's lifetime instead of leaking one per probe.
+
+## Every health check capped at 5 seconds
+
+**Decision:** a `PostConfigure<HealthCheckServiceOptions>` sets `Timeout = 5s` on every registration.
+
+**Why:** the default is no timeout, and `AddDbContextCheck` has no timeout parameter.
+Without a cap, a hung dependency hangs the probe, and repeated probes pile up inside the app.
+The cap works by cancelling the check's `CancellationToken`, so it only shortens checks that accept one: the Redis ping doesn't, and is bounded by Redis's own 5 s timeout instead.
+
+## Forwarded headers trusted from any proxy
+
+**Decision:** `UseForwardedHeaders` with `XForwardedFor | XForwardedProto`, `KnownIPNetworks` and `KnownProxies` cleared, `ForwardLimit` left at 1.
+`UseHttpsRedirection` is removed.
+
+**Why:** Container Apps terminates HTTPS at its ingress and forwards plain HTTP, so without this the app sees every request as `http` from the proxy's IP: `CreatedAtAction` would build `http://` `Location` headers and the redirect middleware would redirect requests that were already HTTPS.
+The ingress's address isn't known in advance, so the known-proxy lists are cleared.
+That is only safe because the ingress is the only way into the container and sets these headers itself; `ForwardLimit` 1 reads only the entry the ingress appended.
+If the API is ever reachable another way, this has to change.
+
+## Migrations as an idempotent SQL script, applied by a separate job
+
+**Decision:** `dotnet ef migrations script --idempotent` runs inside the `be` Docker build (`migrations-script` stage) and the result ships in a `postgres:17`-based `migrate` image that applies it with `psql -v ON_ERROR_STOP=1`.
+Locally it's a one-shot Compose service that `be` and `worker` wait for; in Phase 10 the pipeline runs it before deploying.
+`dotnet-ef` is pinned in `dotnet-tools.json`.
+
+**Why not `Database.Migrate()` at startup:** two replicas would race, the app would need schema-change rights, and a failed migration would take the app down with it.
+**Why a script over a migration bundle:** EF Core's docs recommend SQL scripts for production because the SQL can be reviewed before it runs; a bundle is an executable that can't be.
+**Why idempotent:** each migration is guarded by a check against `__EFMigrationsHistory`, so the same file is safe against a database at any version, any number of times.
+

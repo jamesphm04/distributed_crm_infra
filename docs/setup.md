@@ -20,7 +20,7 @@ Doesn't block anything, but worth renaming the GitHub repo itself at some point 
 ## Prerequisites on the new device
 
 - .NET 10 SDK
-- `dotnet-ef` global tool: `dotnet tool install --global dotnet-ef`
+- `dotnet-ef`: pinned per repo, `dotnet tool restore` in `distributed_crm_be`
 - Docker Desktop (or another Docker runtime) running
 - Node.js (for `distributed_crm_fe` — check `package.json` engines field for exact version)
 - `python3` (only for decoding tokens locally)
@@ -60,20 +60,16 @@ Both repos involved are public, so these values never go into git.
    - Postgres: `5436` → `5432`
    - Redis: `6380` → `6379`
    - Service Bus emulator: `5672` → `5672` (AMQP), `5300` → `5300` (health: `curl http://localhost:5300/health`). Takes ~30s to become healthy; the apps retry until it is. Its SQL Edge storage container publishes no ports.
-4. Apply migrations (creates the schema in the fresh database):
-   ```bash
-   cd ../distributed_crm_be
-   dotnet ef database update \
-     --project src/DistributedCrm.Infrastructure \
-     --startup-project src/DistributedCrm.Api
-   ```
+   Migrations run automatically: the one-shot `migrate` service applies the idempotent SQL script from the `be` image before `be` and `worker` start, and then shows as `Exited (0)` in `docker compose ps -a`.
+   Check what's applied with `docker compose exec postgres psql -U postgres -d distributed_crm -c 'select migration_id from "__EFMigrationsHistory"'`.
+4. Check the API is up: `curl -i http://localhost:5214/health/ready` → `200 Healthy` (Postgres, Redis and Service Bus all reachable). `/health/live` only says the process is running.
 5. Get an ID token and make a request — see "Getting a Google ID token" below.
 
 ## Running the API with `dotnet run` instead
 
 Useful for debugging, or for running a second instance to test statelessness/idempotency (see `decisions.md`).
 
-1. Start only the backing services: `docker compose up -d postgres redis servicebus` (from `distributed_crm_infra`).
+1. Start only the backing services and the migration job: `docker compose up -d postgres migrate redis servicebus` (from `distributed_crm_infra`).
 2. Put the Google values in user secrets (stored in `~/.microsoft/usersecrets/`, outside the repo):
    ```bash
    cd distributed_crm_be
@@ -86,6 +82,18 @@ Useful for debugging, or for running a second instance to test statelessness/ide
      dotnet run --project src/DistributedCrm.Api --no-launch-profile
    ```
    A second instance: same command with port `5215`.
+
+## Creating a migration
+
+The EF tool version is pinned per repo in `distributed_crm_be/dotnet-tools.json`; run `dotnet tool restore` once after cloning.
+```bash
+cd distributed_crm_be
+dotnet ef migrations add <Name> \
+  --project src/DistributedCrm.Infrastructure \
+  --startup-project src/DistributedCrm.Api
+```
+Then `docker compose up -d --build migrate` (from `distributed_crm_infra`) regenerates the script and applies it.
+To read the generated SQL: `docker build --target migrate -t distributed-crm-migrate ../distributed_crm_be && docker run --rm --entrypoint cat distributed-crm-migrate /migrations/migrate.sql`.
 
 ## Getting a Google ID token
 
@@ -119,3 +127,5 @@ curl -i -X POST http://localhost:5214/api/return-requests \
 - `--no-launch-profile` skips `launchSettings.json` entirely, including its `ASPNETCORE_ENVIRONMENT=Development` default — always set that env var explicitly alongside it, or `appsettings.Development.json` (connection strings) and user secrets silently won't load.
 - zsh treats an unquoted `&` in a URL as a job-control operator — always quote curl URLs that have query strings, e.g. `curl -s "http://localhost:5214/api/return-requests?page=1&pageSize=10"`.
 - `curl -s` hides HTTP status codes. Use `curl -i` or `-v` when a response looks empty/unexpected — a malformed GUID against a `{id:guid}` route, for example, fails the route match and returns a silent `404` with an empty body.
+- The `migrate` log is all `DO` lines whether it applied anything or not — each migration sits inside a `DO $EF$ … END $EF$` block, and `psql` only reports top-level statements. Query `__EFMigrationsHistory` to know what's applied.
+- `be` or `worker` not starting after a schema change → `docker compose logs migrate`. With `ON_ERROR_STOP=1` a failing migration exits non-zero, and Compose refuses to start the apps.

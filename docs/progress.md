@@ -1,6 +1,6 @@
 # Progress
 
-Phase numbers match the ordered learning goals in `CLAUDE.md`. Last updated 2026-10-14.
+Phase numbers match the ordered learning goals in `CLAUDE.md`. Last updated 2026-10-15.
 
 ## Phase 1 — Schema + API contract — done, verified end-to-end
 
@@ -133,7 +133,26 @@ Also checked: a worker started with `dotnet run` (Development config) attached i
 - Emulator rejects a duplicate-detection window over 5 minutes and refuses to start (`Expected time to be less than or equal to 5m`).
 - Phase 4's consumer treated `{}` as a valid message for `Guid.Empty` and acked it away as "not found"; the new consumer dead-letters it.
 
-## Phase 8 — Deploy readiness + OpenTelemetry — not started
+## Phase 8 — Deploy readiness + OpenTelemetry — in progress
+
+James writes the code this phase, step by step; each step is reviewed and then verified by him against the Compose stack.
+
+**Done so far (`be` + `infra`):**
+- **Step 1–3, health endpoints on `be`:** `/health/live` runs no checks; `/health/ready` checks Postgres (`AddDbContextCheck`), Redis (`RedisHealthCheck`, a ping through the app's multiplexer) and Service Bus (`ServiceBusQueueHealthCheck`, a peek through the app's client, registered as a singleton so it holds one receiver link). Both are `AllowAnonymous`; every check is capped at 5 seconds.
+- **Step 4, forwarded headers:** `UseHttpsRedirection` removed; `UseForwardedHeaders` (`X-Forwarded-For` + `X-Forwarded-Proto`, any proxy trusted, `ForwardLimit` 1) is the first middleware.
+- **Step 5, migrations as an idempotent SQL script:** `dotnet-tools.json` pins `dotnet-ef` 10.0.12. The `be` Dockerfile gained a `migrations-script` stage (`dotnet ef migrations script --idempotent`) and a `migrate` stage (`postgres:17` + the script, `psql -v ON_ERROR_STOP=1`). Compose runs `migrate` as a one-shot job; `be` and `worker` wait for `service_completed_successfully`.
+
+**Verified live:**
+- `/health/live` and `/health/ready` → `200 Healthy`; `/api/return-requests` without a token still `401`.
+- Redis stopped → `/health/live` `200` in ~1 ms, `/health/ready` `503` in ~5.7 s (Redis's own 5 s command timeout), log line `Health check redis with status Unhealthy` with the exception; Redis started → `200` again without restarting the API.
+- `Location` on create is `http://…` for a direct request and `https://…` with `X-Forwarded-Proto: https`.
+- `migrate` exits `0` on every `docker compose up` and is a no-op against the existing database. Against a fresh empty database it created all three tables and recorded both migrations; a second run changed nothing.
+
+**Gotchas found:**
+- `psql` prints only `DO` for each guarded block of the idempotent script, whether it applied a migration or skipped it — check `__EFMigrationsHistory`, not the log.
+- The `UseHttpsRedirection` warning `Failed to determine the https port for redirect` was logged on every request in the container; gone with Step 4.
+
+**Remaining:** `.dockerignore` + non-root user in both images, the worker Dockerfile's `FromAsCasing` warning, an explicit Compose project name (the `distributed_crm_distributed-crm-pgdata` volume warns that it was created for project `distributed_crm`), env-only config review, the worker's health endpoints, OpenTelemetry (traces, metrics, logs) with one trace from the API through the outbox and Service Bus to the worker.
 
 ## Phase 9 — Bicep infrastructure — not started
 
@@ -168,3 +187,4 @@ Also checked: a worker started with `dotnet run` (Development config) attached i
 - `distributed_crm_infra`: first commit made 2026-10-14, holds `docker-compose.yml` and `docs/`. Pushed to GitHub, public, under `jamesphm04`.
 - Phase 6 changes `be`, `worker` (log level + connection string only) and `infra`.
 - Phase 7 changes `be`, `worker` and `infra`.
+- Phase 8 checkpoint (Steps 1–5) committed in `be` and `infra` on 2026-10-15; the phase isn't done yet.
