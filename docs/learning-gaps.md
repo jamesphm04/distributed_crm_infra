@@ -42,12 +42,19 @@ When a later quiz answers it correctly, move it to **Resolved** with the date.
 - **Missed:** a trace only continues across a hop if something carries the trace context.
 - **Short answer:** HTTP headers and Service Bus message properties carry `traceparent` automatically; a database row (the outbox) does not unless it has a column for it. Step 11 adds `outbox_messages.trace_parent` for exactly this.
 
+### Finding a failed request with telemetry
+
+- **Came up:** Phase 8, phase quiz (Q3). Didn't know where to start; expected the trace to hold the request payload.
+- **Missed:** how to get from "this request is stuck" to its trace, and that bodies aren't recorded.
+- **Short answer:** spans and logs carry IDs, not payloads (bodies can hold personal data and are large). Search the request's ID in **Structured logs**, open the row's trace link, and read the red spans: the exception on each `approval-api RequestDecision` span and the final `dead-lettering` log say why it stopped.
+
 ## Partly understood (worth a quick re-check)
 
 - **Why `.dockerignore` matters** (Phase 8, Steps 6–8 Q1): named cache invalidation, missed host paths in `obj/project.assets.json` and secrets (`.env`) ending up in an image layer.
 - **Fail fast at startup** (Phase 8, Steps 6–8 Q5): named "know immediately", missed that a crashing new revision never takes traffic while start-then-fail breaks live users.
 - **Cache-aside in a trace** (Phase 8, Step 9 Q1): said the trace "doesn't involve SQL"; the reason is that a Redis hit returns before Postgres is ever called.
 - **Privileged ports and non-root containers** (Phase 8, Steps 6–8 Q2): needed the explanation that ports below 1024 need root, so .NET images listen on 8080.
+- **Migrations as a separate job** (Phase 8, phase quiz Q2): named the race between replicas; missed that the old version keeps serving while the new one starts (so the schema must work for both), that a failed migration should stop the pipeline before deploy instead of crash-looping replicas, and that the app then never needs permission to change the schema.
 - **Case-sensitive patterns** (Phase 8, Steps 6–8 Q3): needed the explanation that Docker matches `.dockerignore` case-sensitively while macOS filenames are not.
 
 ## Resolved

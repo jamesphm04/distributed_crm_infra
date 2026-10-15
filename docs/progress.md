@@ -199,6 +199,14 @@ At his request the agent built Steps 7–8, 9d, 10 and 11, verified them, and sh
 
 **Not verified here:** export to Application Insights (Phase 9 changes only the OTLP endpoint and its auth).
 
+**Phase demos and quiz (2026-10-16):** James ran all three demos: worker exits `134` on a blank `ConnectionStrings__Redis`; with Redis stopped, `/health/live` stays `200` while `/health/ready` returns `503`; with `FailureRate=1.0`, a POST became one trace with four failed attempts and a dead-letter.
+Quiz gaps logged in `learning-gaps.md`.
+
+**Known gap, not on the roadmap yet:** a dead-lettered request stays `Processing` forever, and nothing tells anyone.
+Staying `Processing` is deliberate (the worker never got a decision, so `Approved`/`Rejected` would be false), but from outside "slow" and "given up" look the same; only the dead-letter queue and the worker's error log know.
+A real fix has three parts: a terminal status such as `NeedsAttention` set when the worker dead-letters (a Domain status-machine change, to be discussed first), an alert on dead-letter count or on time spent in `Processing` (fits Phase 10 or 15 once App Insights exists), and a redrive path for a human.
+WCP's Pinnacle credit write-back will need the same.
+
 ## Phase 9 — Bicep infrastructure — not started
 
 ## Phase 10 — GitHub Actions pipeline + first live deploy — not started
