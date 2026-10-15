@@ -7,7 +7,7 @@ For *why* the non-obvious choices were made, see [`decisions.md`](decisions.md).
 
 ```
 distributed_crm_be       ASP.NET Core API — Clean Architecture (Domain/Application/Infrastructure/Api), MVC controllers
-distributed_crm_worker   ASP.NET Core Worker Service — consumes the queue, calls a simulated flaky third-party API
+distributed_crm_worker   .NET background worker on an ASP.NET Core host (health endpoints only) — consumes the queue, calls a simulated flaky third-party API
 distributed_crm_fe       React + TypeScript (Vite), linted with Oxlint
 
 Postgres   — system of record: `return_requests`, plus `outbox_messages`
@@ -65,9 +65,9 @@ client ──Authorization: Bearer <ID token>──▶ be
 - Code lives in `DistributedCrm.Api/Authentication/` (`GoogleAuthOptions`, `AllowedEmailRequirement`, `AllowedEmailHandler`) and is wired in `Program.cs`. Domain, Application and Infrastructure have no auth code.
 - The allowlist policy is both the default and the fallback authorization policy, so any endpoint without `[AllowAnonymous]` is protected. Only the health endpoints and the dev OpenAPI document are anonymous.
 - Config: `GoogleAuth:ClientId` and `GoogleAuth:AllowedEmails` (validated at startup). Values come from user secrets or `distributed_crm_infra/.env`, never from git.
-- `worker` has no auth — it never receives HTTP requests.
+- `worker` has no auth — its only HTTP endpoints are the anonymous health probes.
 
-## Health, proxies and migrations (`be`)
+## Health, proxies and migrations
 
 ```
 Container Apps ingress ──HTTPS terminated, X-Forwarded-For/-Proto added──▶ be :8080
@@ -80,7 +80,15 @@ Container Apps ingress ──HTTPS terminated, X-Forwarded-For/-Proto added─�
 
 - Health-check classes live in `DistributedCrm.Infrastructure/HealthChecks/`; registration and endpoint mapping are in `Program.cs`. The responses carry only `Healthy`/`Unhealthy`; failures are logged with the exception.
 - There is no `UseHttpsRedirection`: HTTPS is enforced at the ingress.
+- `worker` exposes the same `/health/live` and `/health/ready` (same three checks, its own copies of the check classes) on port 8080, and nothing else. It has no auth and no forwarded headers; Container Apps will reach it only from its own probes.
 - **Migrations** never run inside the app. The `be` Dockerfile's `migrations-script` stage generates `dotnet ef migrations script --idempotent`; its `migrate` stage is `postgres:17` + that script, run with `psql -v ON_ERROR_STOP=1` and configured by `PG*` environment variables. In Compose it is a one-shot job that `be` and `worker` wait for (`service_completed_successfully`).
+
+## Configuration and containers
+
+- **Config is environment variables only.** Connection strings come from `ConnectionStrings__DistributedCrm`, `ConnectionStrings__Redis` and `ConnectionStrings__ServiceBus`; `be` also needs `GoogleAuth__ClientId` and `GoogleAuth__AllowedEmails__0`. Each app reads them through `GetRequiredConnectionString` (`Configuration/ConfigurationExtensions.cs`) or validated options before the host is built, so a missing value stops startup with its name.
+- **EF tools** use `DistributedCrmDbContextFactory` (`IDesignTimeDbContextFactory` in `be` Infrastructure), so `dotnet ef` needs no connection string and never runs `Program.cs`.
+- **Images.** Both are multi-stage: `sdk:10.0` builds, `aspnet:10.0` runs. The runtime stage runs as the non-root `app` user (UID 1654), listens on 8080, and starts as `tini -- dotnet <app>.dll`, so `tini` is PID 1 and the app is its child. `.dockerignore` keeps `bin/`, `obj/`, `.git/` and `.env` out of the build context. `be`'s Dockerfile has two more stages, `migrations-script` and `migrate`.
+- **Compose project** is pinned as `distributed_crm`, so images are `distributed_crm-be`, `distributed_crm-worker` and `distributed_crm-migrate`, and the network is `distributed_crm_default`.
 
 ## Statelessness
 
@@ -150,7 +158,7 @@ Phase 4's RabbitMQ three-exchange retry/DLX topology is gone from the code; see 
 
 ## `distributed_crm_worker` — current state
 
-Built: `ReturnRequestConsumer` processes `return-requests` (see above), `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. Per `decisions.md`, it shares no code with the API's Domain/Application projects.
+Built: `ReturnRequestConsumer` (a hosted service on a `WebApplication` host that maps only the health endpoints) processes `return-requests` (see above), `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. Per `decisions.md`, it shares no code with the API's Domain/Application projects.
 
 ## `distributed_crm_fe` — current state
 

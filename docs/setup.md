@@ -57,12 +57,13 @@ Both repos involved are public, so these values never go into git.
    ```
    Port mappings (host → container), all bound to `127.0.0.1` only:
    - API (`be`): `5214` → `8080`
+   - Worker health endpoints: `5216` → `8080` (`/health/live`, `/health/ready`; the worker serves nothing else)
    - Postgres: `5436` → `5432`
    - Redis: `6380` → `6379`
    - Service Bus emulator: `5672` → `5672` (AMQP), `5300` → `5300` (health: `curl http://localhost:5300/health`). Takes ~30s to become healthy; the apps retry until it is. Its SQL Edge storage container publishes no ports.
    Migrations run automatically: the one-shot `migrate` service applies the idempotent SQL script from the `be` image before `be` and `worker` start, and then shows as `Exited (0)` in `docker compose ps -a`.
    Check what's applied with `docker compose exec postgres psql -U postgres -d distributed_crm -c 'select migration_id from "__EFMigrationsHistory"'`.
-4. Check the API is up: `curl -i http://localhost:5214/health/ready` → `200 Healthy` (Postgres, Redis and Service Bus all reachable). `/health/live` only says the process is running.
+4. Check both apps are up: `curl -i http://localhost:5214/health/ready` (API) and `curl -i http://localhost:5216/health/ready` (worker) → `200 Healthy` (Postgres, Redis and Service Bus all reachable). `/health/live` only says the process is running.
 5. Get an ID token and make a request — see "Getting a Google ID token" below.
 
 ## Running the API with `dotnet run` instead
@@ -82,6 +83,12 @@ Useful for debugging, or for running a second instance to test statelessness/ide
      dotnet run --project src/DistributedCrm.Api --no-launch-profile
    ```
    A second instance: same command with port `5215`.
+
+The worker runs the same way; its launch profile listens on `http://localhost:5216` (stop the `worker` container first):
+```bash
+cd distributed_crm_worker
+dotnet run --project src/DistributedCrm.Worker
+```
 
 ## Creating a migration
 
@@ -128,4 +135,7 @@ curl -i -X POST http://localhost:5214/api/return-requests \
 - zsh treats an unquoted `&` in a URL as a job-control operator — always quote curl URLs that have query strings, e.g. `curl -s "http://localhost:5214/api/return-requests?page=1&pageSize=10"`.
 - `curl -s` hides HTTP status codes. Use `curl -i` or `-v` when a response looks empty/unexpected — a malformed GUID against a `{id:guid}` route, for example, fails the route match and returns a silent `404` with an empty body.
 - The `migrate` log is all `DO` lines whether it applied anything or not — each migration sits inside a `DO $EF$ … END $EF$` block, and `psql` only reports top-level statements. Query `__EFMigrationsHistory` to know what's applied.
+- An app container exits with code `134` right after starting → read `docker compose logs be` (or `worker`). A missing connection string is named in the error, e.g. `Set the ConnectionStrings__Redis environment variable.` `134` means the process aborted; `tini` passes the code through.
+- The Compose project is pinned as `distributed_crm` (`name:` in `docker-compose.yml`). Images built before that are named `distributed_crm_infra-*` and are no longer used: `docker image rm distributed_crm_infra-be distributed_crm_infra-worker distributed_crm_infra-migrate`. If you ever change `name:` again, run `docker compose down` first, or the old containers become orphans that block the fixed `container_name`s.
+- `.dockerignore` patterns are case-sensitive even though macOS file names aren't: `.DS_store` does not match `.DS_Store`.
 - `be` or `worker` not starting after a schema change → `docker compose logs migrate`. With `ON_ERROR_STOP=1` a failing migration exits non-zero, and Compose refuses to start the apps.

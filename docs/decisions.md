@@ -279,3 +279,69 @@ Locally it's a one-shot Compose service that `be` and `worker` wait for; in Phas
 **Why a script over a migration bundle:** EF Core's docs recommend SQL scripts for production because the SQL can be reviewed before it runs; a bundle is an executable that can't be.
 **Why idempotent:** each migration is guarded by a check against `__EFMigrationsHistory`, so the same file is safe against a database at any version, any number of times.
 
+
+## `.dockerignore` in every image repo
+
+**Decision:** both `be` and `worker` exclude `**/bin/`, `**/obj/`, `.git/`, IDE folders, `*.user`, `**/.DS_Store`, `**/.env`, the `Dockerfile` and `.dockerignore` from the build context.
+
+**Why:** `COPY . .` copies whatever the context holds.
+Host `obj/` folders carry `project.assets.json` with the Mac's absolute NuGet paths, so a container build could start from another machine's restore state.
+A `.env` copied into a layer stays readable in the image even if a later layer deletes it.
+Every host build also changed `bin/`, which invalidated the `COPY` layer and everything after it.
+The context went from ~50 MB to ~324 KB.
+Patterns are case-sensitive even on macOS's case-insensitive file system.
+
+## Images run as the non-root `app` user
+
+**Decision:** `USER $APP_UID` in both runtime stages, after anything that needs root (installing `tini`).
+
+**Why:** a compromised process running as root in a container is one kernel bug away from root on the host, and can rewrite its own image's files.
+Microsoft's .NET 8+ images ship the `app` user (UID 1654) and listen on 8080 by default for exactly this: ports below 1024 need root.
+The migration image is left as `postgres:17`'s default user because it only runs `psql` against a remote server and exits.
+
+## Compose project name pinned
+
+**Decision:** `name: distributed_crm` at the top of `docker-compose.yml`.
+
+**Why:** without it, the project name is the folder name, and Compose labels and prefixes everything with it.
+The data volume was created when this file lived in `distributed_crm/`, so after the move to `distributed_crm_infra/` it warned on every `up` that it belonged to another project.
+Pinning the name makes the project independent of where the repo is cloned.
+The switch needs `docker compose down` first, while Compose still recognises the old containers as its own.
+
+## Required config read at startup, not on first use
+
+**Decision:** both apps read their connection strings through `GetRequiredConnectionString` (in each repo's `Configuration/ConfigurationExtensions.cs`) before the host is built.
+A missing or blank value throws, naming the environment variable to set.
+
+**Why:** all config comes from environment variables, so a typo in a Container Apps setting is the likely failure.
+Thrown at startup, the new revision never becomes healthy and the platform keeps traffic on the old one; the log names the missing variable.
+Read lazily, the app would pass liveness, take traffic, and fail user requests with an error deep inside a client library.
+The two repos each have their own copy of the helper, keeping the no-shared-code rule.
+
+## Design-time `DbContext` factory for the EF tools
+
+**Decision:** `DistributedCrmDbContextFactory` (`IDesignTimeDbContextFactory`) in `be`'s Infrastructure builds the context with `UseNpgsql()` and no connection string, plus snake-case naming.
+
+**Why:** without it, `dotnet ef` builds the app's host to find the `DbContext`, which runs `Program.cs`.
+That only worked because `appsettings.Development.json` supplied connection strings, and it broke once startup required them.
+Generating a migration or a script needs the model and the provider, not a database, so the tools should not need app config at all.
+The factory must apply the same conventions as `Program.cs`, or migrations would be generated against a different model.
+
+## The worker is a web host with only health endpoints
+
+**Decision:** the worker uses the Web SDK, `WebApplication.CreateBuilder` and the `aspnet` runtime image, and maps only `/health/live` and `/health/ready`, with the same checks as `be`.
+It has no authentication and no forwarded headers, and Container Apps will give it no external ingress.
+
+**Why:** Container Apps' probes are HTTP or TCP; a plain Worker Service has nothing for a probe to hit.
+A TCP probe would only prove a port is open, not that Postgres, Redis and Service Bus are reachable.
+The alternative, a hand-rolled `HttpListener` or a file-based probe, is more code for a worse version of what ASP.NET Core already does.
+The health-check classes are copied from `be`, not shared, per the no-shared-code rule.
+
+## `tini` as PID 1 in both images
+
+**Decision:** both runtime stages install `tini` and use `ENTRYPOINT ["tini", "--", "dotnet", "<app>.dll"]`.
+
+**Why:** the first process in a container is PID 1, and the kernel ignores signals with a default action for PID 1 unless it installed a handler.
+.NET ends an unhandled crash with `abort()`, so its `SIGABRT` was dropped and the process spun at ~100% CPU instead of exiting; verified live, and verified fixed by `docker run --init`.
+`tini` makes the app an ordinary child process, exits with its exit code (`134` for an abort), forwards `SIGTERM` for graceful shutdown, and reaps zombie processes.
+It is baked into the image rather than relying on `docker run --init`, because Container Apps has no equivalent option.

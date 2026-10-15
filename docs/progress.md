@@ -137,22 +137,40 @@ Also checked: a worker started with `dotnet run` (Development config) attached i
 
 James writes the code this phase, step by step; each step is reviewed and then verified by him against the Compose stack.
 
-**Done so far (`be` + `infra`):**
+**Done so far (`be`, `worker` + `infra`):**
 - **Step 1–3, health endpoints on `be`:** `/health/live` runs no checks; `/health/ready` checks Postgres (`AddDbContextCheck`), Redis (`RedisHealthCheck`, a ping through the app's multiplexer) and Service Bus (`ServiceBusQueueHealthCheck`, a peek through the app's client, registered as a singleton so it holds one receiver link). Both are `AllowAnonymous`; every check is capped at 5 seconds.
 - **Step 4, forwarded headers:** `UseHttpsRedirection` removed; `UseForwardedHeaders` (`X-Forwarded-For` + `X-Forwarded-Proto`, any proxy trusted, `ForwardLimit` 1) is the first middleware.
 - **Step 5, migrations as an idempotent SQL script:** `dotnet-tools.json` pins `dotnet-ef` 10.0.12. The `be` Dockerfile gained a `migrations-script` stage (`dotnet ef migrations script --idempotent`) and a `migrate` stage (`postgres:17` + the script, `psql -v ON_ERROR_STOP=1`). Compose runs `migrate` as a one-shot job; `be` and `worker` wait for `service_completed_successfully`.
+- **Step 6, container hygiene:** `.dockerignore` in both repos (`bin/`, `obj/`, `.git/`, IDE folders, `.DS_Store`, `.env`); the build context dropped from ~50 MB to ~324 KB. Both runtime stages run as the image's non-root `app` user (`USER $APP_UID`). The worker Dockerfile's `FromAsCasing` warning and BOM are fixed. Compose pins `name: distributed_crm`, which ended the volume's project-label warning; images are now `distributed_crm-*`.
+- **Step 7, env-only config, failing fast:** both apps read their three connection strings through `GetRequiredConnectionString` before building the host, so a missing one stops startup with the variable's name. `be` gained `DistributedCrmDbContextFactory` (design-time), so the EF tools no longer run `Program.cs` and no longer depend on `appsettings.Development.json`.
+- **Step 8, worker health:** the worker moved to the Web SDK and `WebApplication`, and exposes the same `/health/live` and `/health/ready` (Postgres, Redis, Service Bus) on port 8080, published on `127.0.0.1:5216`. It has no other HTTP surface.
+- **tini as PID 1:** both runtime images install `tini` and start with `ENTRYPOINT ["tini", "--", "dotnet", …]` (see Bugs found).
 
 **Verified live:**
 - `/health/live` and `/health/ready` → `200 Healthy`; `/api/return-requests` without a token still `401`.
 - Redis stopped → `/health/live` `200` in ~1 ms, `/health/ready` `503` in ~5.7 s (Redis's own 5 s command timeout), log line `Health check redis with status Unhealthy` with the exception; Redis started → `200` again without restarting the API.
 - `Location` on create is `http://…` for a direct request and `https://…` with `X-Forwarded-Proto: https`.
 - `migrate` exits `0` on every `docker compose up` and is a no-op against the existing database. Against a fresh empty database it created all three tables and recorded both migrations; a second run changed nothing.
+- `docker compose down` then `up` under the new project name: the volume warning is gone and the existing 30 rows survived.
+- `localhost:5214/health/*` and `localhost:5216/health/*` all `200 Healthy`; `id` in both containers is `uid=1654(app)`.
+- An empty `ConnectionStrings__Redis` makes either app exit `134` within seconds, logging `Connection string 'Redis' is not configured. Set the ConnectionStrings__Redis environment variable.`
+- EF tools report `Using DbContext factory`; the generated idempotent script is byte-identical to the one before, and `has-pending-model-changes` reports none.
+- The worker still processes messages after the switch to a web host: an outbox-inserted request went through two simulated failures and scheduled retries to `Rejected`.
+- `docker compose stop worker` logs `Application is shutting down...` and exits `0`; `tini` is PID 1 with `dotnet` as its child.
+- `dotnet run` of the worker listens on `http://localhost:5216` in `Development`, `/health/ready` `200`.
+
+**Bugs found:**
+- **A crashing .NET app hung as PID 1 instead of exiting.** With the fail-fast check throwing, the container stayed `Up` with `dotnet` at ~100% CPU for over a minute. .NET ends a crash with `abort()`, which raises `SIGABRT` on itself, and the kernel drops signals with a default action for PID 1 of a PID namespace. The same image under `docker run --init` exited `134` at once. Fixed with `tini` as PID 1 in both images; in Container Apps the hang would have looked like a stuck replica instead of a crash-and-restart.
+- **The EF tools only worked because of `appsettings.Development.json`.** Without a design-time factory they built the app's host to get the `DbContext`, so they needed real connection strings at design time. Found when fail-fast config made them throw.
+- **`.dockerignore` had `**/.DS_store`.** Docker matches patterns case-sensitively, so it matched nothing; macOS's case-insensitive file system hid the typo.
 
 **Gotchas found:**
 - `psql` prints only `DO` for each guarded block of the idempotent script, whether it applied a migration or skipped it — check `__EFMigrationsHistory`, not the log.
 - The `UseHttpsRedirection` warning `Failed to determine the https port for redirect` was logged on every request in the container; gone with Step 4.
+- The Compose project had to be brought `down` *before* setting `name:`. Compose owns containers by the `com.docker.compose.project` label, so after a rename it no longer sees the old ones; with fixed `container_name`s, the next `up` would fail on a name conflict.
+- The rename left the old images (`distributed_crm_infra-be`, `-worker`, `-migrate`, and `distributed-crm-migrate`) behind; they are unused and can be removed with `docker image rm`.
 
-**Remaining:** `.dockerignore` + non-root user in both images, the worker Dockerfile's `FromAsCasing` warning, an explicit Compose project name (the `distributed_crm_distributed-crm-pgdata` volume warns that it was created for project `distributed_crm`), env-only config review, the worker's health endpoints, OpenTelemetry (traces, metrics, logs) with one trace from the API through the outbox and Service Bus to the worker.
+**Remaining:** OpenTelemetry (traces, metrics, logs) in `be` (Step 9) and `worker` (Step 10), then one trace from the API through the outbox and Service Bus to the worker (Step 11), and the phase's final end-to-end check (Step 12).
 
 ## Phase 9 — Bicep infrastructure — not started
 
@@ -188,3 +206,4 @@ James writes the code this phase, step by step; each step is reviewed and then v
 - Phase 6 changes `be`, `worker` (log level + connection string only) and `infra`.
 - Phase 7 changes `be`, `worker` and `infra`.
 - Phase 8 checkpoint (Steps 1–5) committed in `be` and `infra` on 2026-10-15; the phase isn't done yet.
+- Phase 8 Steps 6–8 committed in `be`, `worker` and `infra` on 2026-10-15; OpenTelemetry is still to come.

@@ -1,3 +1,7 @@
+# Pinned so the project (and the labels on its volume) doesn't depend on the folder name;
+# the data volume was created when this file lived in distributed_crm/.
+name: distributed_crm
+
 services:
   postgres:
     image: postgres:17
@@ -98,6 +102,8 @@ services:
         condition: service_healthy
       servicebus:
         condition: service_started # the emulator image has no shell for a healthcheck; the SDK retries until it's up
+    ports:
+      - "127.0.0.1:5216:8080" # health endpoints only
     environment:
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword;Gss Encryption Mode=Disable"
       ConnectionStrings__Redis: "redis:6379"

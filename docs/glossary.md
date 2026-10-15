@@ -32,6 +32,22 @@ Terminology introduced while building this project, written as it was actually e
 
 **One-shot Compose service** — a service that runs a job and exits, like `migrate`. Others wait for it with `depends_on: condition: service_completed_successfully`, which requires exit code `0`.
 
+**Build context** — the files `docker build` sends to the builder, normally the whole folder the Dockerfile is in. `COPY . .` copies from it, so anything not excluded by `.dockerignore` (build output, `.git/`, `.env`) can end up in an image layer.
+
+**Privileged port** — on Linux, ports below 1024 can only be opened by root. Why .NET images listen on 8080 instead of 80: so the app can run as the non-root `app` user.
+
+**PID 1 / init process** — the first process in a PID namespace. On a machine it's `init`/`systemd`; in a container it's whatever `ENTRYPOINT` starts. The kernel protects PID 1 by ignoring signals it would die from unless it installed a handler, so an app that crashes with `abort()` as PID 1 can hang instead of exiting.
+
+**tini** — a minimal init for containers: it runs as PID 1, starts the app as its child, forwards signals like `SIGTERM` to it, reaps zombie processes, and exits with the app's exit code. `docker run --init` injects it; this project bakes it into the images.
+
+**Exit code 134** — 128 + 6, where 6 is `SIGABRT`: the process was killed by an abort, which is how .NET ends an unhandled crash. (`137` is 128 + 9, `SIGKILL`, e.g. out of memory.)
+
+**Compose project name** — the name Compose labels and prefixes everything it creates with (containers, network, volumes, images). Defaults to the folder name; set with `name:` in the file.
+
+**Design-time `DbContext` factory** — an `IDesignTimeDbContextFactory<T>` the EF tools use to create the `DbContext` for `migrations add` and `migrations script`, instead of building the app's host. Means the tools need no app config or database.
+
+**Fail fast** — checking required config (or any precondition) at startup and crashing with a clear message, instead of starting and failing later on a user's request.
+
 ## Authentication
 
 **Authentication vs authorization** — authentication answers "who are you?" (here: a valid Google ID token); authorization answers "are you allowed to do this?" (here: is your email on the allowlist). A failure of the first is a `401`, of the second a `403`.
