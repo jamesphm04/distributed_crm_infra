@@ -86,6 +86,7 @@ Container Apps ingress ──HTTPS terminated, X-Forwarded-For/-Proto added─�
 ## Configuration and containers
 
 - **Config is environment variables only.** Connection strings come from `ConnectionStrings__DistributedCrm`, `ConnectionStrings__Redis` and `ConnectionStrings__ServiceBus`; `be` also needs `GoogleAuth__ClientId` and `GoogleAuth__AllowedEmails__0`. Each app reads them through `GetRequiredConnectionString` (`Configuration/ConfigurationExtensions.cs`) or validated options before the host is built, so a missing value stops startup with its name.
+- **Passwordless in Azure, same image everywhere.** `Infrastructure/Authentication/EntraAuthentication.cs` (one copy per repo) decides per dependency from the value's shape: a Postgres connection string without `Password`, a Redis connection string without `password`, or a Service Bus value that is a namespace host name rather than an `Endpoint=…` connection string signs in with a Microsoft Entra token for the app's managed identity, through one `DefaultAzureCredential`. Locally every value carries a password or key, so the credential is never used; compose gives Redis a password (`--requirepass`) for exactly this reason. Postgres takes a fresh token for each new physical connection (`UsePeriodicPasswordProvider`, refreshed every 5 minutes from the credential's cache); Redis re-authenticates each connection before its token expires (`Microsoft.Azure.StackExchangeRedis`).
 - **EF tools** use `DistributedCrmDbContextFactory` (`IDesignTimeDbContextFactory` in `be` Infrastructure), so `dotnet ef` needs no connection string and never runs `Program.cs`.
 - **Images.** Both are multi-stage: `sdk:10.0` builds, `aspnet:10.0` runs. The runtime stage runs as the non-root `app` user (UID 1654), listens on 8080, and starts as `tini -- dotnet <app>.dll`, so `tini` is PID 1 and the app is its child. `.dockerignore` keeps `bin/`, `obj/`, `.git/` and `.env` out of the build context. `be`'s Dockerfile has two more stages, `migrations-script` and `migrate`.
 - **Compose project** is pinned as `distributed_crm`, so images are `distributed_crm-be`, `distributed_crm-worker` and `distributed_crm-migrate`, and the network is `distributed_crm_default`.
@@ -180,8 +181,9 @@ worker crashes / lock lost ─▶ Service Bus redelivers; after MaxDeliveryCount
 The dead-letter queue is the queue's built-in `$DeadLetterQueue` subqueue — terminal, nothing consumes it, a human inspects it.
 Scheduling happens before completing, so a crash in between causes one extra attempt (tolerated by the handler's status guards and `xmin`), never a lost message.
 
-**Connections:** both apps register `ServiceBusClient` via `AddAzureClients(...AddServiceBusClient(connectionString))`.
-The client connects lazily and retries on its own, so there is no startup retry loop; Phase 10 switches to `AddServiceBusClientWithNamespace` + managed identity.
+**Connections:** both apps register `ServiceBusClient` via `AddAzureClients`: `AddServiceBusClient(connectionString)` for the emulator's connection string.
+The client connects lazily and retries on its own, so there is no startup retry loop.
+In Azure the value is the namespace's host name, so it is registered with `AddServiceBusClientWithNamespace` and signs in with the managed identity.
 
 Phase 4's RabbitMQ three-exchange retry/DLX topology is gone from the code; see `decisions.md` and `progress.md` for how it worked and how it maps onto this design.
 

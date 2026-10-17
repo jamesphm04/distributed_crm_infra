@@ -257,6 +257,18 @@ Verified with Redis stopped: GET 200 in 0.7 s, POST 503 with `Retry-After: 5` in
 **Known issue, deferred until after the demo:** if `TryClaimAsync` succeeds but the Postgres commit then fails, the key stays `IN_PROGRESS` for its 24-hour TTL and every retry with it gets 409.
 The fix is to release the claim when the save fails, which needs a `ReleaseAsync` on the `IIdempotencyStore` port (an Application change).
 
+### 10.2 Passwordless sign-in — done, verified locally (2026-10-17)
+
+`Infrastructure/Authentication/EntraAuthentication.cs` (one copy in be, one in the worker) decides per dependency from the configured value: a password or key present means use it (local compose), none means a Microsoft Entra token for the app's managed identity (Azure).
+Postgres gets a token per new physical connection through `UsePeriodicPasswordProvider`; Redis uses `Microsoft.Azure.StackExchangeRedis`; Service Bus uses `AddServiceBusClientWithNamespace` when the value is a namespace rather than a connection string.
+All three share one `DefaultAzureCredential`, registered as `TokenCredential`.
+Compose now gives Redis a password (`--requirepass devpassword`), so local and Azure follow the same rule; `appsettings.Development.json` in both repos matches.
+
+Verified locally: both `/health/ready` return 200; `redis-cli ping` without the password returns `NOAUTH`; a POST went through Service Bus and the worker to `Rejected`.
+With the Redis password removed, be took the Entra path and failed at startup with `Failed to acquire token`: after 1 minute 50 seconds with the full credential chain (the Azure SDK retrying the managed-identity endpoint, which doesn't exist on a laptop), and after 10 seconds with `AZURE_TOKEN_CREDENTIALS=dev`.
+So 10.3 sets `AZURE_TOKEN_CREDENTIALS=ManagedIdentityCredential` and `AZURE_CLIENT_ID` on each Container App: only the managed identity is tried, and the user-assigned identity is named.
+The token path itself is first exercised in Azure in 10.3.
+
 ## Phase 10b — Private network — not started
 
 Added 2026-10-17 at James's request, after Phase 9 chose public endpoints with Entra-only sign-in.

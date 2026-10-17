@@ -37,10 +37,13 @@ services:
   redis:
     image: redis:7
     container_name: distributed-crm-redis
+    # A password, so local dev signs in like Azure does: the apps use a password when the connection string has one
+    # and a managed-identity token when it doesn't.
+    command: ["redis-server", "--requirepass", "devpassword"]
     ports:
       - "127.0.0.1:6380:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "devpassword", "--no-auth-warning", "ping"]
       interval: 2s
       timeout: 3s
       retries: 10
@@ -95,7 +98,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword;Gss Encryption Mode=Disable"
-      ConnectionStrings__Redis: "redis:6379"
+      ConnectionStrings__Redis: "redis:6379,password=devpassword"
       ConnectionStrings__ServiceBus: "Endpoint=sb://servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
       GoogleAuth__ClientId: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID in .env}
@@ -117,7 +120,7 @@ services:
       - "127.0.0.1:5216:8080" # health endpoints only
     environment:
       ConnectionStrings__DistributedCrm: "Host=postgres;Port=5432;Database=distributed_crm;Username=postgres;Password=devpassword;Gss Encryption Mode=Disable"
-      ConnectionStrings__Redis: "redis:6379"
+      ConnectionStrings__Redis: "redis:6379,password=devpassword"
       ConnectionStrings__ServiceBus: "Endpoint=sb://servicebus;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
 
