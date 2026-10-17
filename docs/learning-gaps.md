@@ -64,6 +64,9 @@ When a later quiz answers it correctly, move it to **Resolved** with the date.
 
 ## Partly understood (worth a quick re-check)
 
+- **Token expiry** (Phase 10, Step 10.2 Q1): named the Entra token; missed what happens when it expires: nothing breaks, because the app asks the credential for a new one before each new connection (refreshed every 5 minutes), and connections already open stay signed in.
+- **Why local Redis got a password** (Phase 10, Step 10.2 Q2): said there's no token locally; the missing link is that the app chooses by the value's shape, so a Redis value without a password sends it down the token path, which fails on a laptop (demo 3). The password keeps local on the password path.
+- **Narrowing the credential chain** (Phase 10, Step 10.2 Q3): said it retries; missed the consequences (a misconfigured revision takes about 2 minutes to fail, and a full chain could sign in with an unexpected credential, such as stray `AZURE_CLIENT_SECRET` variables) and the fix (`AZURE_TOKEN_CREDENTIALS=ManagedIdentityCredential` plus `AZURE_CLIENT_ID`).
 - **Fail open vs fail closed** (Phase 10, Step 10.1 Q1): named what happens (read from the database, a duplicate must fail) but not the rule behind it: the cache is an optimisation, so skipping it costs only speed; idempotency is a guarantee, so skipping it costs correctness (a duplicate return request).
 
 - **Why `.dockerignore` matters** (Phase 8, Steps 6–8 Q1): named cache invalidation, missed host paths in `obj/project.assets.json` and secrets (`.env`) ending up in an image layer.
