@@ -2,3 +2,5 @@
 .DS_Store
 # Local config
 .env
+# IDE
+.idea/

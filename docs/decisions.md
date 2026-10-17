@@ -401,3 +401,55 @@ Application's `IOutboxStore` is unchanged: capturing the context is how Infrastr
 Its spans arrive about 10 s late because it drains profiling sessions in batches.
 
 **Revisit if:** a stable release appears, or an SE.Redis upgrade stops Redis spans appearing.
+
+## Apps sign in to Azure services with their managed identity, not passwords
+
+**Decision:** in Azure, `be` and `worker` reach Postgres, Redis and Service Bus with Entra ID tokens from their user-assigned managed identities (`DefaultAzureCredential`).
+No connection string in Azure carries a password or key; each holds only the host or namespace, and the identity's role assignments decide what it may do.
+Locally the apps keep today's connection strings, because the Service Bus emulator and the local Postgres and Redis containers don't accept Entra tokens.
+Key Vault (RBAC mode) still exists and holds what is left: the Google client ID and allowlist now, and from Phase 13 the external API key, which stands in for WCP's Pinnacle credentials.
+
+**Why:** a stored password is long-lived and works for anyone who has it, from anywhere, until someone rotates it; a token expires within about an hour, is refreshed automatically, and one app's access is revoked by deleting one role assignment.
+Storing the three connection strings in Key Vault (the roadmap's literal wording) was considered: less Phase 10 code, but three long-lived secrets to protect and rotate.
+This still meets WCP's rule that secrets and connection strings live in Key Vault and never in committed config; there are just fewer secrets.
+The change is Infrastructure-only: the same Application ports, with DI choosing a token credential in Azure and a connection string locally.
+
+**Cost:** each client needs a token-based setup for Azure as well as the local one, and tools like `psql` need an extra step to get a token.
+
+## Service Bus Standard, for duplicate detection
+
+**Decision:** the Azure namespace is Standard tier (about AUD 14.25/month, billed hourly), and the `return-requests` queue keeps `RequiresDuplicateDetection` with a 5-minute window, exactly as in the emulator's `servicebus/Config.json`.
+
+**Why:** if `be` crashes after the relay sends a message but before it marks the outbox row as sent, the relay sends it again with the same `MessageId` (`return-request-created:{id}`).
+Duplicate detection drops that copy before it reaches the queue.
+The worker's own guards (`AlreadyFinished`, then `xmin` on the save) keep the row correct, but two copies processed at the same moment would both call the approval API before either save, and a database check can't undo a call to another system.
+In WCP that call is the Pinnacle credit write-back, where a second call could credit a customer twice.
+Basic tier (about AUD 0.07 per million operations) has no duplicate detection; choosing it would also mean dropping the setting locally, so the emulator would no longer match Azure.
+
+**Limits:** the window is 5 minutes, so a resend after that still gets through; the worker's guards stay, and the real Pinnacle call will need its own idempotency key.
+
+## Public endpoints with Entra-only sign-in, no private network (for now)
+
+**Decision:** Postgres, Redis, Key Vault and Service Bus keep public endpoints.
+Postgres allows connections from Azure services (the `0.0.0.0` firewall rule) and accepts only Entra tokens (`passwordAuth: Disabled`); Service Bus has `disableLocalAuth: true`.
+The deployer (James now, the pipeline from Phase 10) is the Postgres Entra admin; the migrate step creates the app roles with `pgaadauth_create_principal` and grants them row access only.
+
+**Why:** with no passwords or keys anywhere, being able to reach a server is not the same as being able to log in; every login is an Entra token for an identity we granted.
+A private network (VNet-integrated Container Apps environment, private endpoints, private DNS zones) would add a new step the roadmap doesn't list, about AUD 11/month per private endpoint, and still leave Service Bus public, because Standard tier can't use private endpoints.
+
+**Trade-off:** the "Azure services" rule admits connections from any Azure resource, including other customers', so the network layer here only keeps out the non-Azure internet.
+
+**Planned:** Phase 10b moves the apps, Postgres, Redis, Key Vault and the registry onto a private network, once the apps run in Azure; Service Bus stays public there too. WCP production should use the same.
+
+## Managed Redis: `NoEviction`, no high availability in the sandbox
+
+**Decision:** Azure Managed Redis Balanced B0, `evictionPolicy: NoEviction`, `highAvailability: Disabled`, access keys disabled (Entra access policy assignments for the two app identities), one TLS endpoint on port 10000 (`EnterpriseCluster`).
+
+**Why `NoEviction`:** Redis holds two kinds of keys, both with a TTL, so the default `VolatileLRU` could evict either.
+Losing a cached return request is only a cache miss, but losing an idempotency claim lets a retried `POST` with the same `Idempotency-Key` create a second return request, silently.
+A wrong answer is worse than an error: with `NoEviction` a full cache refuses writes, so the `POST` fails and the client retries later.
+
+**Why no high availability:** the price list bills per instance, and HA runs a second one; in the sandbox a Redis restart only loses cached entries and in-flight claims.
+Production (WCP) should turn it on.
+
+**Consequence found:** `be`'s cache writes aren't wrapped, so a refused write (or Redis being down) turns a successful Postgres read into a 500; see the Phase 9 known issue in `progress.md`.

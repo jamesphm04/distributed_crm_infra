@@ -92,6 +92,18 @@ cd distributed_crm_worker
 dotnet run --project src/DistributedCrm.Worker
 ```
 
+## Azure environment (Phase 9)
+
+Needs the Azure CLI signed in (`az login`) with Owner on the `distributed-crm-sandbox` subscription, and the Bicep compiler (`az bicep install`).
+From `distributed_crm_infra`:
+```bash
+infra/deploy.sh plan   # what-if: shows what would change, creates nothing
+infra/deploy.sh up     # creates or updates everything (bills by the hour from here)
+infra/deploy.sh down   # deletes everything the stack created and purges the Key Vault
+```
+Run `down` at the end of every session; see `costs.md` for what each resource costs.
+Every command pins the subscription, so the CLI's current subscription doesn't matter.
+
 ## Creating a migration
 
 The EF tool version is pinned per repo in `distributed_crm_be/dotnet-tools.json`; run `dotnet tool restore` once after cloning.

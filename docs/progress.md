@@ -207,9 +207,24 @@ Staying `Processing` is deliberate (the worker never got a decision, so `Approve
 A real fix has three parts: a terminal status such as `NeedsAttention` set when the worker dead-letters (a Domain status-machine change, to be discussed first), an alert on dead-letter count or on time spent in `Processing` (fits Phase 10 or 15 once App Insights exists), and a redrive path for a human.
 WCP's Pinnacle credit write-back will need the same.
 
-## Phase 9 — Bicep infrastructure — not started
+## Phase 9 — Bicep infrastructure — in progress
+
+Steps 1–9 written and checked with `az bicep build`, `validate` and `what-if` (18 resources to create, 9 access assignments that what-if can't calculate until the app identities exist); nothing deployed yet: resource group, Log Analytics + App Insights, two app identities + Container Registry, Key Vault, Service Bus Standard, Postgres Flexible Server (Entra-only), Managed Redis, Container Apps environment, and `infra/deploy.sh plan|up|down` on a deployment stack.
+Azure subscription `distributed-crm-sandbox` created for the project (WCP billing, AUD 100/month budget with an alert at 80%).
+
+**Still to do:** the rehearsal (Monday 2026-10-19): `up`, check every resource and permission, a second `plan` showing no changes, sign in to Postgres with `psql` as the `live.com#…` Entra admin through a temporary firewall rule for James's IP, `down`, then record the actual charges in `costs.md`.
+Watch for: `Microsoft.App` not yet registered on the subscription, Managed Redis taking 10–30 minutes to create.
+Team demo planned for Tuesday 2026-10-20.
+
+**Known issue for Phase 10, found while choosing Redis's eviction policy:** in `be`, `RedisReturnRequestCache` doesn't catch Redis failures, so a failed cache read or write (Redis down, or full under `NoEviction`) makes `GET /api/return-requests/{id}` return 500 even when Postgres has the row.
+The cache should be optional (log and serve from Postgres); idempotency must stay strict.
+Fix in Phase 10 alongside the Entra sign-in change to the Redis connection, reproducing it first by stopping Redis and calling the `GET`.
 
 ## Phase 10 — GitHub Actions pipeline + first live deploy — not started
+
+## Phase 10b — Private network — not started
+
+Added 2026-10-17 at James's request, after Phase 9 chose public endpoints with Entra-only sign-in.
 
 ## Phase 11 — React + Ant Design frontend on Static Web Apps — not started
 

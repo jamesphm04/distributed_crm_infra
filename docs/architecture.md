@@ -185,6 +185,27 @@ The client connects lazily and retries on its own, so there is no startup retry 
 
 Phase 4's RabbitMQ three-exchange retry/DLX topology is gone from the code; see `decisions.md` and `progress.md` for how it worked and how it maps onto this design.
 
+## Azure environment (Bicep, `infra/`)
+
+Written in Phase 9 and checked with build, validate and what-if; first real deploy is the Phase 9 rehearsal.
+`infra/main.bicep` runs at subscription scope, creates `rg-dcrm-dev`, and calls one module per area with `scope: rg`.
+`infra/main.bicepparam` holds the values (region `australiaeast`, workload `dcrm`, environment `dev`, tags); no secret values live in either file.
+`infra/deploy.sh plan|up|down` wraps it: `plan` is a what-if, `up` creates or updates a deployment stack (`dcrm-dev`, `--action-on-unmanage deleteAll`), `down` deletes everything the stack owns and purges the soft-deleted Key Vault.
+
+| Module | Resources | Access |
+|---|---|---|
+| `monitoring` | Log Analytics workspace (`PerGB2018`, 30 days, 0.5 GB/day cap) and workspace-based Application Insights | — |
+| `identities` | user-assigned managed identities `id-dcrm-be-dev`, `id-dcrm-worker-dev` | — |
+| `registry` | Container Registry Basic, admin user off | AcrPull for both apps |
+| `keyvault` | Key Vault Standard, RBAC mode, 7-day soft delete, no purge protection | Secrets User for both apps; Secrets Officer for the deployer |
+| `servicebus` | Standard namespace (local auth off) and the `return-requests` queue, settings identical to `servicebus/Config.json` | Data Sender for both apps, Data Receiver for the worker, scoped to the queue |
+| `postgres` | Flexible Server B1ms, Postgres 17, 32 GB, Entra-only auth, `distributed_crm` database, "Azure services" firewall rule | the deployer is the Entra admin; app roles are created by the migrate step |
+| `redis` | Managed Redis Balanced B0, no HA, TLS on 10000, access keys off, `NoEviction` | Entra access policy assignments for both apps |
+| `containerapps-env` | Container Apps environment (Consumption profile only), logs to the workspace through a diagnostic setting | — |
+
+Globally unique names (registry, vault, Service Bus, Postgres, Redis) end in `uniqueString(resourceGroup().id)`, so they are the same on every rebuild of the same resource group.
+Every permission is granted to a principal ID (a GUID), never a name; role assignment names come from `guid(scope, principal, role)`, so redeploys find the same assignment.
+
 ## `distributed_crm_worker` — current state
 
 Built: `ReturnRequestConsumer` (a hosted service on a `WebApplication` host that maps only the health endpoints) processes `return-requests` (see above), `ProcessReturnRequestHandler` calls the simulated approval API, commits the new status to Postgres before acking, and invalidates `be`'s `returnrequest:{id}` cache key. It exports traces, metrics and logs as `distributed-crm-worker` (see Telemetry). Per `decisions.md`, it shares no code with the API's Domain/Application projects.
