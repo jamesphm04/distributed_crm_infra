@@ -207,7 +207,7 @@ Staying `Processing` is deliberate (the worker never got a decision, so `Approve
 A real fix has three parts: a terminal status such as `NeedsAttention` set when the worker dead-letters (a Domain status-machine change, to be discussed first), an alert on dead-letter count or on time spent in `Processing` (fits Phase 10 or 15 once App Insights exists), and a redrive path for a human.
 WCP's Pinnacle credit write-back will need the same.
 
-## Phase 9 — Bicep infrastructure — in progress
+## Phase 9 — Bicep infrastructure — done, verified live
 
 Steps 1–9 written and checked with `az bicep build`, `validate` and `what-if` (18 resources to create, 9 access assignments that what-if can't calculate until the app identities exist); nothing deployed yet: resource group, Log Analytics + App Insights, two app identities + Container Registry, Key Vault, Service Bus Standard, Postgres Flexible Server (Entra-only), Managed Redis, Container Apps environment, and `infra/deploy.sh plan|up|down` on a deployment stack.
 Azure subscription `distributed-crm-sandbox` created for the project (WCP billing, AUD 100/month budget with an alert at 80%).
@@ -224,7 +224,9 @@ Azure subscription `distributed-crm-sandbox` created for the project (WCP billin
 - Resource providers are off on a new subscription. `deploy.sh up` now registers every provider the templates use, including `Microsoft.AlertsManagement`, which nothing references directly: App Insights creates a Failure Anomalies alert rule through it as a side deployment, and that side deployment failed.
 - The first `up` failed with a 409 (`AadAuthOperationCannotBePerformedWhenServerIsNotAccessible`): a Flexible Server applies one change at a time, and ARM ran its Entra admin, firewall rule and database in parallel. They are now chained with `dependsOn`. The re-run created only what was missing, because ARM deployments are declarative and don't roll back.
 
-**Still to do:** confirm `down` removed the resource group and purged the Key Vault, then record the actual charges in `costs.md` (session about 16:54–18:00 on 2026-10-17; charges appear the next day).
+- `down` took about 90 minutes (17:49–19:10); afterwards `az group exists` returned `false` and the deleted-vault list was empty, so the Key Vault was purged.
+
+**Still to do:** record the actual charges in `costs.md` (session about 16:54–19:10 on 2026-10-17; charges appear the next day).
 Team demo planned for Tuesday 2026-10-20.
 
 **Plan for the demo (agreed 2026-10-17):** finish Phase 9 on Saturday, Phase 10 over the weekend, then Phase 15 (k6) on Monday, pulled forward ahead of 10b–14 so the demo can show a load result.
