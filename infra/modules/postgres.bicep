@@ -57,6 +57,7 @@ resource entraAdmin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@20
 }
 
 // 0.0.0.0 to 0.0.0.0 is Azure's special rule for "allow connections from Azure services".
+// A Flexible Server applies one change at a time, so its child resources are chained with dependsOn instead of running in parallel.
 resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
   parent: server
   name: 'AllowAzureServices'
@@ -64,6 +65,9 @@ resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallR
     startIpAddress: '0.0.0.0'
     endIpAddress: '0.0.0.0'
   }
+  dependsOn: [
+    entraAdmin
+  ]
 }
 
 resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
@@ -73,6 +77,9 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-0
     charset: 'UTF8'
     collation: 'en_US.utf8'
   }
+  dependsOn: [
+    allowAzureServices
+  ]
 }
 
 output serverName string = server.name

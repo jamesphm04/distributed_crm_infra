@@ -212,15 +212,48 @@ WCP's Pinnacle credit write-back will need the same.
 Steps 1–9 written and checked with `az bicep build`, `validate` and `what-if` (18 resources to create, 9 access assignments that what-if can't calculate until the app identities exist); nothing deployed yet: resource group, Log Analytics + App Insights, two app identities + Container Registry, Key Vault, Service Bus Standard, Postgres Flexible Server (Entra-only), Managed Redis, Container Apps environment, and `infra/deploy.sh plan|up|down` on a deployment stack.
 Azure subscription `distributed-crm-sandbox` created for the project (WCP billing, AUD 100/month budget with an alert at 80%).
 
-**Still to do:** the rehearsal (Monday 2026-10-19): `up`, check every resource and permission, a second `plan` showing no changes, sign in to Postgres with `psql` as the `live.com#…` Entra admin through a temporary firewall rule for James's IP, `down`, then record the actual charges in `costs.md`.
-Watch for: `Microsoft.App` not yet registered on the subscription, Managed Redis taking 10–30 minutes to create.
+**Rehearsal (Saturday 2026-10-17), verified live:**
+
+- `up` created all 27 stack items on the second run (about 4 minutes); a second `plan` showed no real drift, only server-side defaults and App Insights' `Flow_Type`/`Request_Source`.
+- Role assignments checked with `az role assignment list --assignee <principalId>`, because what-if lists them as unsupported on every run: be has AcrPull, Key Vault Secrets User and Service Bus Data Sender; the worker has the same three plus Service Bus Data Receiver; both identities have a Redis access policy.
+- James signed in to Postgres with `psql` as the Entra admin, using `az account get-access-token --resource-type oss-rdbms` as the password.
+- Portal walkthrough: tenant, management group, subscription and resource group hierarchy, Entra roles versus Azure RBAC, the managed identities as service principals, the stack's deployments and the Activity log.
+
+**Bugs found and fixed:**
+
+- Resource providers are off on a new subscription. `deploy.sh up` now registers every provider the templates use, including `Microsoft.AlertsManagement`, which nothing references directly: App Insights creates a Failure Anomalies alert rule through it as a side deployment, and that side deployment failed.
+- The first `up` failed with a 409 (`AadAuthOperationCannotBePerformedWhenServerIsNotAccessible`): a Flexible Server applies one change at a time, and ARM ran its Entra admin, firewall rule and database in parallel. They are now chained with `dependsOn`. The re-run created only what was missing, because ARM deployments are declarative and don't roll back.
+
+**Still to do:** confirm `down` removed the resource group and purged the Key Vault, then record the actual charges in `costs.md` (session about 16:54–18:00 on 2026-10-17; charges appear the next day).
 Team demo planned for Tuesday 2026-10-20.
 
-**Known issue for Phase 10, found while choosing Redis's eviction policy:** in `be`, `RedisReturnRequestCache` doesn't catch Redis failures, so a failed cache read or write (Redis down, or full under `NoEviction`) makes `GET /api/return-requests/{id}` return 500 even when Postgres has the row.
+**Plan for the demo (agreed 2026-10-17):** finish Phase 9 on Saturday, Phase 10 over the weekend, then Phase 15 (k6) on Monday, pulled forward ahead of 10b–14 so the demo can show a load result.
+Phases 10b, 11, 12, 13 and 14 follow after the demo, and the load test is re-run once search exists.
+The rehearsal moves from Monday to Saturday 2026-10-17.
+
+**Known issue for Phase 10 (fixed in 10.1), found while choosing Redis's eviction policy:** in `be`, `RedisReturnRequestCache` doesn't catch Redis failures, so a failed cache read or write (Redis down, or full under `NoEviction`) makes `GET /api/return-requests/{id}` return 500 even when Postgres has the row.
 The cache should be optional (log and serve from Postgres); idempotency must stay strict.
 Fix in Phase 10 alongside the Entra sign-in change to the Redis connection, reproducing it first by stopping Redis and calling the `GET`.
 
-## Phase 10 — GitHub Actions pipeline + first live deploy — not started
+## Phase 10 — GitHub Actions pipeline + first live deploy — in progress
+
+### 10.1 Redis failure handling — done, verified locally (2026-10-17)
+
+Reproduced first, by stopping the Redis container: `GET /api/return-requests/{id}` returned 500 after 5.4 s with the row in Postgres, and `POST /api/return-requests` returned 500 after 6.0 s with no row written (checked in `return_requests`).
+The 5 s was StackExchange.Redis's default backlog: with no connection it queues each command until the timeout instead of failing.
+
+The fix treats the two Redis uses differently, because the cache is an optimisation and idempotency is a guarantee:
+
+- `RedisReturnRequestCache` (be) fails open: a failed read is a miss, so the GET falls back to Postgres; a failed write or invalidation is logged and skipped, leaving an entry at most one TTL (5 minutes) stale.
+- `RedisIdempotencyStore` (be) fails closed: a failed claim throws `IdempotencyStoreUnavailableException` (Application), which the controller maps to 503 with `Retry-After: 5`. Creating the request anyway would let a retry with the same key create a duplicate. A failed `StoreResultAsync` happens after the commit, so it is logged and the 201 still returns; the key stays `IN_PROGRESS`, so a retry gets 409 rather than a duplicate.
+- `RedisReturnRequestCacheInvalidator` (worker) logs instead of throwing: the status change has already committed, and a redelivery would find the request finished and skip the invalidation anyway.
+- Both apps set `BacklogPolicy.FailFast`, so a disconnected Redis fails in milliseconds instead of holding a thread and a connection for 5 s.
+- Both catch `RedisException` and `RedisTimeoutException`; the second derives from `TimeoutException`, not `RedisException`.
+
+Verified with Redis stopped: GET 200 in 0.7 s, POST 503 with `Retry-After: 5` in 12 ms and no row written, `/health/ready` 503.
+
+**Known issue, deferred until after the demo:** if `TryClaimAsync` succeeds but the Postgres commit then fails, the key stays `IN_PROGRESS` for its 24-hour TTL and every retry with it gets 409.
+The fix is to release the claim when the save fails, which needs a `ReleaseAsync` on the `IIdempotencyStore` port (an Application change).
 
 ## Phase 10b — Private network — not started
 

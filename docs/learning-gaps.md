@@ -46,7 +46,9 @@ When a later quiz answers it correctly, move it to **Resolved** with the date.
 
 - **Came up:** Phase 9, Step 6 quiz (Q1), and again in the Step 8 quiz (Q1). Didn't know why the count stayed the same after adding resources that reference no app identity.
 - **Missed:** "unsupported" means what-if can't calculate a resource's ID before the deploy runs.
+- **Came up again:** Phase 9 phase quiz (Q2), after the live deploy: still "unsupported" with the identities existing.
 - **Short answer:** every unsupported item is a role or access assignment for an app identity, whose principal ID only exists once the identity is created during the real deploy. The Postgres resources use no app identity, and its Entra admin uses `deployer()`, which is James, who already exists, so what-if can show all four.
+- **Added after the live deploy:** what-if never looks up live values; it only evaluates the template. A role assignment's name is `guid(scope, principalId, role)`, and `principalId` comes from `reference()` on the identity, which is only evaluated during a real deploy. So they stay unsupported on every run, and are verified instead with `az role assignment list --assignee <principalId>`.
 
 ### Finding a failed request with telemetry
 
@@ -54,7 +56,15 @@ When a later quiz answers it correctly, move it to **Resolved** with the date.
 - **Missed:** how to get from "this request is stuck" to its trace, and that bodies aren't recorded.
 - **Short answer:** spans and logs carry IDs, not payloads (bodies can hold personal data and are large). Search the request's ID in **Structured logs**, open the row's trace link, and read the red spans: the exception on each `approval-api RequestDecision` span and the final `dead-lettering` log say why it stopped.
 
+### Why a slow failure is worse than a fast one
+
+- **Came up:** Phase 10, Step 10.1 quiz (Q3). Didn't see what `BacklogPolicy.FailFast` changes when the catches already return 200.
+- **Missed:** latency is a failure mode of its own, and under load a slow dependency spreads.
+- **Short answer:** without fail-fast, each request waits 5 s for Redis before the catch runs. At 100 requests a second that is 500 requests in flight, each holding a thread and a Postgres connection, so the thread pool and the connection pool run out and even endpoints that never touch Redis start timing out. Fail-fast makes the degraded path as fast as the normal one.
+
 ## Partly understood (worth a quick re-check)
+
+- **Fail open vs fail closed** (Phase 10, Step 10.1 Q1): named what happens (read from the database, a duplicate must fail) but not the rule behind it: the cache is an optimisation, so skipping it costs only speed; idempotency is a guarantee, so skipping it costs correctness (a duplicate return request).
 
 - **Why `.dockerignore` matters** (Phase 8, Steps 6–8 Q1): named cache invalidation, missed host paths in `obj/project.assets.json` and secrets (`.env`) ending up in an image layer.
 - **Fail fast at startup** (Phase 8, Steps 6–8 Q5): named "know immediately", missed that a crashing new revision never takes traffic while start-then-fail breaks live users.
@@ -66,6 +76,8 @@ When a later quiz answers it correctly, move it to **Resolved** with the date.
 - **Deterministic role assignment names** (Phase 9, Step 3 Q2): said a random GUID "is not idempotent"; missed the concrete failure: the second deploy tries to add the same principal + role + scope under a new name and Azure rejects it with `RoleAssignmentExists`.
 - **How a managed identity signs in** (Phase 9, Step 3 Q3): said "use its principal ID"; the flow is that the app is attached to its identity (by resource ID), asks Entra ID for a short-lived token as that identity, and the registry checks the token against the AcrPull assignment. No password is stored anywhere.
 - **Secret values never go in Bicep** (Phase 9, Step 4 Q3): not answered; a value written in a template lands in the public repo and in Azure's deployment history, which anyone with read access to the resource group can open. Values are set separately (`az keyvault secret set`, later the pipeline).
+- **Why a failed deploy can just be re-run** (Phase 9, phase quiz Q1): said the resources are "isolated from each other"; missed that ARM is declarative and idempotent: a failed deployment doesn't roll back, and the next run compares each resource with the template, leaves matching ones alone and creates only what's missing.
+- **Control plane vs data plane** (Phase 9, phase quiz Q3): answered that only the apps may read secrets; missed that Owner is a control-plane role (manage the vault itself) and reading a secret is a data-plane action that needs its own role, which is why the Bicep gives `deployer()` Key Vault Secrets Officer.
 - **Case-sensitive patterns** (Phase 8, Steps 6–8 Q3): needed the explanation that Docker matches `.dockerignore` case-sensitively while macOS filenames are not.
 
 ## Resolved

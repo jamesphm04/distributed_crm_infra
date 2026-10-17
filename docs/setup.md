@@ -103,6 +103,7 @@ infra/deploy.sh down   # deletes everything the stack created and purges the Key
 ```
 Run `down` at the end of every session; see `costs.md` for what each resource costs.
 Every command pins the subscription, so the CLI's current subscription doesn't matter.
+`up` first registers any resource provider the templates need that the subscription hasn't enabled yet (a one-time step per subscription, a few minutes each).
 
 ## Creating a migration
 
