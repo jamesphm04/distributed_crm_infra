@@ -21,6 +21,8 @@ To turn rates into people we use Little's Law with a deliberately heavy staff me
 ## Setup
 
 - Environment: 2 API replicas and 1 worker at 0.5 vCPU / 1 GiB each, Postgres Flexible Server B1ms, Managed Redis Balanced B0, Service Bus Standard, all in Australia East.
+- No autoscaling: the API is fixed at 2 replicas and the worker at 1 (`min = max` in each `app.bicep`), and the `Replicas` metric stayed at 2 throughout, apart from a third replica for a moment during the outage run's rolling restart.
+  Every number below is what this fixed size does, not a best case.
 - Load from a laptop in Adelaide, about 25 ms from Australia East.
   `dropped_iterations` stayed under 15 per run (of 47,000 to 99,000), so the laptop was never the bottleneck.
 - Two kinds of user ran at once: `lookups` (GET a random return request from a pool of 200) and `journeys` (create, then poll every 2 s, up to 8 times).
