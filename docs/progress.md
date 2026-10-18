@@ -328,13 +328,29 @@ Full results are in `loadtest-results.md`; the design choices are in `decisions.
   - Turning off Redis public network access blocks new connections but not existing ones.
   - Log Analytics went `OverQuota` at about 0.57 GB with a 5 GB cap; cause unknown. App Insights has nothing after 07:58 UTC, so the later runs are evidenced by k6, platform metrics and the replica console logs.
   - A third of trace rows were Redis span events.
+  - The first `down` after Phase 10 failed with `DeploymentStackDeleteFailed`: the Container Apps environment can't be deleted while it holds apps, and the apps and migration job are deployed by the app pipelines, outside the stack. `down` now deletes every container app and job in `rg-dcrm-dev` first; re-run, the resource group and vault were gone.
 - Verified live against Azure: every run above, from a laptop, with real Google sign-in.
 - Pending: the 30-minute soak on Monday after `up`.
 
-## Phase 16 — Demo — not started
+## Phase 16 — Demo — materials drafted 2026-10-18; rehearsal Monday
 
-Added 2026-10-18 at James's request, for the 2026-10-20 team demo.
-A study guide with a demo script and Q&A (`docs/demo-guide.md`) and a slide deck covering Phases 1–15.
+Added 2026-10-18 at James's request, for the 2026-10-20 demo to Gerry (CEO) and Shannon (Orcacom, technical advisor).
+Shape agreed in a grilling session on 2026-10-18:
+
+- No live demo and the stack stays down: results, diagrams, tables and charts only, all from what was recorded in Phases 10 and 15.
+- About 20 minutes plus Q&A. Part 1 (about 8 minutes) is for Gerry, in user terms: a storyboard of the WCP return journey with each step badged proven or not built yet. Part 2 (about 12 minutes) is for Shannon: architecture, reliability, security, delivery, load-test detail and known gaps.
+- Ends with three questions for Shannon (Pinnacle write-back, an Orcacom call-answered event, stack pushback), then the ask to Gerry: lock .NET + PostgreSQL on Azure, running on Container Apps (WCP ADR-002, ADR-005), and come back with a build plan.
+- Monday's rebuild and 30-minute soak are dropped; the soak is listed as a gap.
+
+**Built:**
+
+- `docs/demo/slides.md` (slide-by-slide spec), `docs/demo/script.md` (speaker cues, key lines word for word), `docs/demo/handout.md` (one-page pre-read, emailed Monday).
+- `docs/demo-guide.md`: study guide for Phases 1–15, WCP mapping, likely questions from Gerry and Shannon.
+- The deck in claude.ai Slides (22 slides plus 4 backup), built from `slides.md`, with the script as speaker notes; exports to .pptx.
+
+**Found while drafting:** the retry trace on the trace slide comes from the local Aspire dashboard (Phase 8); the Azure trace in 10.6 succeeded first time. The slide's footnote says so.
+
+**Still to do (Monday):** refresh the cost actuals for 17–18 October, email the handout, timed dry run.
 
 ## Other repos
 

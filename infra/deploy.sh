@@ -116,6 +116,20 @@ down() {
   local vault
   vault="$(stack_output "$stack" keyVaultName)"
 
+  # The apps and the migration job are deployed by the app repos' pipelines, not by this stack, and the Container
+  # Apps environment can't be deleted while they're in it, so they go first.
+  if [[ "$(az group exists --subscription "$subscription" --name rg-dcrm-dev)" == "true" ]]; then
+    local apps=() id
+    while IFS= read -r id; do
+      [[ -n "$id" ]] && apps+=("$id")
+    done < <(az resource list --subscription "$subscription" --resource-group rg-dcrm-dev \
+      --query "[?type=='Microsoft.App/containerApps' || type=='Microsoft.App/jobs'].id" -o tsv)
+    if (( ${#apps[@]} > 0 )); then
+      echo "Deleting the pipeline-deployed apps and jobs first."
+      az resource delete --ids "${apps[@]}"
+    fi
+  fi
+
   az stack sub delete --subscription "$subscription" --name "$stack" \
     --action-on-unmanage deleteAll --yes
 
