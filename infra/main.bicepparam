@@ -8,3 +8,6 @@ param tags = {
   purpose: 'demo'
   owner: 'james'
 }
+
+// Read from the environment so the ID isn't committed; deploy.sh sets it from the dcrm-cicd stack's output.
+param pipelinePrincipalId = readEnvironmentVariable('PIPELINE_PRINCIPAL_ID')

@@ -104,6 +104,22 @@ infra/deploy.sh down   # deletes everything the stack created and purges the Key
 Run `down` at the end of every session; see `costs.md` for what each resource costs.
 Every command pins the subscription, so the CLI's current subscription doesn't matter.
 `up` first registers any resource provider the templates need that the subscription hasn't enabled yet (a one-time step per subscription, a few minutes each).
+It then creates or updates the `dcrm-cicd` stack (the GitHub Actions identity, kept across teardowns), the `dcrm-dev` stack, and copies `GOOGLE_CLIENT_ID` and `ALLOWED_EMAIL` from `.env` into Key Vault.
+
+### Deploying the apps (Phase 10)
+
+One-time GitHub setup, in both `distributed_crm_be` and `distributed_crm_etl` (the worker):
+
+1. **Settings → Environments → New environment** named `dev`. The workflows sign in from it, and Azure trusts only that environment.
+2. Three repository secrets with the values `infra/deploy.sh cicd` prints (IDs, not credentials; sign-in is OIDC):
+   ```bash
+   gh secret set AZURE_CLIENT_ID --repo jamesphm04/<repo> --body "<value>"
+   gh secret set AZURE_TENANT_ID --repo jamesphm04/<repo> --body "<value>"
+   gh secret set AZURE_SUBSCRIPTION_ID --repo jamesphm04/<repo> --body "<value>"
+   ```
+
+Each session, after `up`: **Actions → Deploy → Run workflow** in `distributed_crm_be` first (it runs the migrations), then in `distributed_crm_etl`.
+`down` deletes the Container Apps too, because they live in `rg-dcrm-dev`.
 
 ## Creating a migration
 

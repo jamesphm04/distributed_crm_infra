@@ -269,6 +269,19 @@ With the Redis password removed, be took the Entra path and failed at startup wi
 So 10.3 sets `AZURE_TOKEN_CREDENTIALS=ManagedIdentityCredential` and `AZURE_CLIENT_ID` on each Container App: only the managed identity is tried, and the user-assigned identity is named.
 The token path itself is first exercised in Azure in 10.3.
 
+### 10.3–10.5 Container Apps, migration job, pipeline — written, verified locally, not yet deployed (2026-10-18)
+
+- **Readiness (be):** `/health/ready` now checks only Postgres. Verified locally: 200 with Redis stopped, 200 with Service Bus stopped, 503 with Postgres stopped.
+  Found while reading for the deploy: be's Service Bus readiness check peeks the queue, which needs Receive, and be has only Sender, so in Azure it would never have become ready; and with Redis in readiness, a Redis blip would take both replicas out of traffic.
+- **Telemetry:** Azure Monitor exporter when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set, OTLP otherwise; verified locally that traces still reach Aspire.
+- **Migration job:** `migrations/migrate.sh` and the role SQL in be. Verified locally: the normal path (exit 0), the token path against a fake identity endpoint (one request with the Postgres resource, the client ID and the header; the "token" signed psql in), and a failure (`APP_DB_ROLES` locally, where `pgaadauth_create_principal` doesn't exist) exits 3.
+- **Infra stack:** migrate identity as second Postgres Entra admin, App Insights local auth off with Metrics Publisher for both apps, worker removed from Key Vault readers, pipeline Contributor on the resource group, 17 outputs, Key Vault seeding from `.env` in `up`. `plan`: 20 to create, 12 unsupported, as predicted once the migrate admin was counted as unsupported (its name is the identity's principal ID).
+- **CI/CD identity:** `dcrm-cicd` stack deployed; the federated credentials list exactly the two `environment:dev` subjects. Its first run failed with `RoleDefinitionDoesNotExist`: the Reader role ID had been written from memory; every role ID in the templates was then checked against `az role definition list`.
+- **Container Apps:** `infra/app.bicep` in be (API + migration job, `deployApi` switch) and worker; build and lint clean.
+- **Workflows:** `ci.yml` in be ran green on GitHub (1m15s). It first warned that the actions ran on deprecated Node 20 and that `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19, the day before the demo; the runner is now pinned to `ubuntu-24.04` and the actions updated (checkout v7, setup-dotnet v6). `deploy.yml` in both repos and the worker's `ci.yml` pass actionlint.
+
+**Still to do (step 7, 10.6):** GitHub `dev` environment and secrets in both repos, `up`, run be's then the worker's Deploy, curl the public URL end to end, read the trace in App Insights, `down`.
+
 ## Phase 10b — Private network — not started
 
 Added 2026-10-17 at James's request, after Phase 9 chose public endpoints with Entra-only sign-in.

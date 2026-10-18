@@ -75,13 +75,14 @@ Container Apps ingress ──HTTPS terminated, X-Forwarded-For/-Proto added─�
    UseAuthentication / UseAuthorization
    controllers           /api/return-requests…
    health checks         /health/live  → no checks
-                         /health/ready → postgres (AddDbContextCheck), redis (ping), servicebus (peek)   5 s cap each
+                         /health/ready → postgres (AddDbContextCheck)   5 s cap
 ```
 
-- Health-check classes live in `DistributedCrm.Infrastructure/HealthChecks/`; registration and endpoint mapping are in `Program.cs`. The responses carry only `Healthy`/`Unhealthy`; failures are logged with the exception.
+- `be`'s readiness checks only Postgres (see `decisions.md`): Redis and Service Bus are left out because the API already degrades gracefully without them, and a shared dependency failing readiness on every replica would take the whole API out of traffic. Registration and endpoint mapping are in `Program.cs`. The responses carry only `Healthy`/`Unhealthy`; failures are logged with the exception.
 - There is no `UseHttpsRedirection`: HTTPS is enforced at the ingress.
-- `worker` exposes the same `/health/live` and `/health/ready` (same three checks, its own copies of the check classes) on port 8080, and nothing else. It has no auth and no forwarded headers; Container Apps will reach it only from its own probes.
-- **Migrations** never run inside the app. The `be` Dockerfile's `migrations-script` stage generates `dotnet ef migrations script --idempotent`; its `migrate` stage is `postgres:17` + that script, run with `psql -v ON_ERROR_STOP=1` and configured by `PG*` environment variables. In Compose it is a one-shot job that `be` and `worker` wait for (`service_completed_successfully`).
+- `worker` exposes `/health/live` and `/health/ready` (Postgres, Redis ping and Service Bus peek; the check classes are in its `Infrastructure/HealthChecks/`) on port 8080, and nothing else. It has no auth and no forwarded headers; Container Apps will reach it only from its own probes.
+- **Migrations** never run inside the app. The `be` Dockerfile's `migrations-script` stage generates `dotnet ef migrations script --idempotent`; its `migrate` stage is `postgres:17` + that script + `migrations/migrate.sh`, configured by `PG*` environment variables. In Compose it is a one-shot job that `be` and `worker` wait for (`service_completed_successfully`).
+- **`migrate.sh`** uses `PGPASSWORD` when set (Compose). Otherwise it asks the job's managed identity for a Postgres token through the endpoint Container Apps provides (`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `AZURE_CLIENT_ID`). After the migrations, for each name in `APP_DB_ROLES` (Azure only) it creates the identity's role with `pgaadauth_create_principal` (from the `postgres` database, skipped if it exists) and grants it `SELECT, INSERT, UPDATE, DELETE` on tables, sequence usage, the same as default privileges for future tables, and no access to `__EFMigrationsHistory`. The migrate identity owns every table, so the apps can never change the schema.
 
 ## Configuration and containers
 
@@ -89,6 +90,7 @@ Container Apps ingress ──HTTPS terminated, X-Forwarded-For/-Proto added─�
 - **Passwordless in Azure, same image everywhere.** `Infrastructure/Authentication/EntraAuthentication.cs` (one copy per repo) decides per dependency from the value's shape: a Postgres connection string without `Password`, a Redis connection string without `password`, or a Service Bus value that is a namespace host name rather than an `Endpoint=…` connection string signs in with a Microsoft Entra token for the app's managed identity, through one `DefaultAzureCredential`. Locally every value carries a password or key, so the credential is never used; compose gives Redis a password (`--requirepass`) for exactly this reason. Postgres takes a fresh token for each new physical connection (`UsePeriodicPasswordProvider`, refreshed every 5 minutes from the credential's cache); Redis re-authenticates each connection before its token expires (`Microsoft.Azure.StackExchangeRedis`).
 - **EF tools** use `DistributedCrmDbContextFactory` (`IDesignTimeDbContextFactory` in `be` Infrastructure), so `dotnet ef` needs no connection string and never runs `Program.cs`.
 - **Images.** Both are multi-stage: `sdk:10.0` builds, `aspnet:10.0` runs. The runtime stage runs as the non-root `app` user (UID 1654), listens on 8080, and starts as `tini -- dotnet <app>.dll`, so `tini` is PID 1 and the app is its child. `.dockerignore` keeps `bin/`, `obj/`, `.git/` and `.env` out of the build context. `be`'s Dockerfile has two more stages, `migrations-script` and `migrate`.
+- **Telemetry export** is chosen by configuration: `APPLICATIONINSIGHTS_CONNECTION_STRING` set (Azure) means the Azure Monitor exporter, signed in with the managed identity because App Insights has local auth off; unset means OTLP to the Aspire dashboard. Sampling is off (every trace kept).
 - **Compose project** is pinned as `distributed_crm`, so images are `distributed_crm-be`, `distributed_crm-worker` and `distributed_crm-migrate`, and the network is `distributed_crm_default`.
 
 ## Telemetry (OpenTelemetry)
@@ -189,24 +191,48 @@ Phase 4's RabbitMQ three-exchange retry/DLX topology is gone from the code; see 
 
 ## Azure environment (Bicep, `infra/`)
 
-Written in Phase 9 and checked with build, validate and what-if; first real deploy is the Phase 9 rehearsal.
+Written in Phase 9 and first deployed in the Phase 9 rehearsal; Phase 10 adds the migrate identity, Entra-only App Insights ingestion, the pipeline's access and the outputs the app deployments read.
 `infra/main.bicep` runs at subscription scope, creates `rg-dcrm-dev`, and calls one module per area with `scope: rg`.
 `infra/main.bicepparam` holds the values (region `australiaeast`, workload `dcrm`, environment `dev`, tags); no secret values live in either file.
 `infra/deploy.sh plan|up|down` wraps it: `plan` is a what-if, `up` creates or updates a deployment stack (`dcrm-dev`, `--action-on-unmanage deleteAll`), `down` deletes everything the stack owns and purges the soft-deleted Key Vault.
 
 | Module | Resources | Access |
 |---|---|---|
-| `monitoring` | Log Analytics workspace (`PerGB2018`, 30 days, 0.5 GB/day cap) and workspace-based Application Insights | — |
-| `identities` | user-assigned managed identities `id-dcrm-be-dev`, `id-dcrm-worker-dev` | — |
-| `registry` | Container Registry Basic, admin user off | AcrPull for both apps |
-| `keyvault` | Key Vault Standard, RBAC mode, 7-day soft delete, no purge protection | Secrets User for both apps; Secrets Officer for the deployer |
+| `monitoring` | Log Analytics workspace (`PerGB2018`, 30 days, 0.5 GB/day cap) and workspace-based Application Insights with local auth off | Monitoring Metrics Publisher for both apps |
+| `identities` | user-assigned managed identities `id-dcrm-be-dev`, `id-dcrm-worker-dev`, `id-dcrm-migrate-dev` | — |
+| `registry` | Container Registry Basic, admin user off | AcrPull for both apps and the migrate job |
+| `keyvault` | Key Vault Standard, RBAC mode, 7-day soft delete, no purge protection | Secrets User for `be`; Secrets Officer for the deployer |
 | `servicebus` | Standard namespace (local auth off) and the `return-requests` queue, settings identical to `servicebus/Config.json` | Data Sender for both apps, Data Receiver for the worker, scoped to the queue |
-| `postgres` | Flexible Server B1ms, Postgres 17, 32 GB, Entra-only auth, `distributed_crm` database, "Azure services" firewall rule | the deployer is the Entra admin; app roles are created by the migrate step |
+| `postgres` | Flexible Server B1ms, Postgres 17, 32 GB, Entra-only auth, `distributed_crm` database, "Azure services" firewall rule | the deployer and `id-dcrm-migrate-dev` are Entra admins; app roles are created by the migrate job |
+| `pipeline-access` | — | Contributor on `rg-dcrm-dev` for the GitHub Actions identity |
 | `redis` | Managed Redis Balanced B0, no HA, TLS on 10000, access keys off, `NoEviction` | Entra access policy assignments for both apps |
 | `containerapps-env` | Container Apps environment (Consumption profile only), logs to the workspace through a diagnostic setting | — |
 
 Globally unique names (registry, vault, Service Bus, Postgres, Redis) end in `uniqueString(resourceGroup().id)`, so they are the same on every rebuild of the same resource group.
 Every permission is granted to a principal ID (a GUID), never a name; role assignment names come from `guid(scope, principal, role)`, so redeploys find the same assignment.
+The stack's outputs (environment ID, registry, Key Vault URI, host names, each identity's resource ID, name and client ID, the App Insights connection string) are what the app pipelines read; none is a secret.
+`up` also copies `GOOGLE_CLIENT_ID` and `ALLOWED_EMAIL` from the local `.env` into Key Vault (`google-client-id`, `allowed-email-0`), retrying while the deployer's new Secrets Officer role takes effect.
+
+### CI/CD identity (`infra/cicd/`, stack `dcrm-cicd`)
+
+`rg-dcrm-cicd` holds `id-dcrm-github`, whose federated credentials trust GitHub's OIDC tokens with subject `repo:jamesphm04/<repo>:environment:dev` for `distributed_crm_be` and `distributed_crm_etl` (the worker's GitHub name).
+It has Reader on the subscription (a subscription-level stack's outputs need it) and, through the dev stack, Contributor on `rg-dcrm-dev`.
+`up` creates or updates this stack first and `down` leaves it alone, so the client ID stored in GitHub never changes.
+
+### Container Apps (`infra/app.bicep` in each app repo)
+
+Deployed by each repo's `.github/workflows/deploy.yml`, with the dev stack's outputs as one typed `stack` parameter and the commit SHA as the image tag.
+
+| Resource | Repo | Ingress | Replicas | Identity | Notes |
+|---|---|---|---|---|---|
+| `ca-dcrm-be-dev` | be | external HTTPS → 8080 | 2 fixed | `id-dcrm-be-dev` | Google settings are Key Vault secret references |
+| `caj-dcrm-migrate-dev` | be | — | manual job, 1 retry, 10 min timeout | `id-dcrm-migrate-dev` | `migrate` image; `APP_DB_ROLES` = both app identities |
+| `ca-dcrm-worker-dev` | worker | none | 1 fixed | `id-dcrm-worker-dev` | probes only |
+
+Every app gets host names without credentials (so it signs in with tokens), `AZURE_CLIENT_ID`, `AZURE_TOKEN_CREDENTIALS=ManagedIdentityCredential` and `APPLICATIONINSIGHTS_CONNECTION_STRING`, and has startup (60 s), liveness (`/health/live`) and readiness (`/health/ready`) probes.
+be's pipeline deploys `app.bicep` twice: first with `deployApi=false` (the job only), runs the job and waits for success, then with `deployApi=true`, then curls `/health/ready` on the public URL.
+The worker's pipeline deploys its app and waits for the latest revision to be healthy.
+Both repos also have `ci.yml`: Release build and image builds on every push and pull request, without Azure.
 
 ## `distributed_crm_worker` — current state
 

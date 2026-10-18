@@ -453,3 +453,43 @@ A wrong answer is worse than an error: with `NoEviction` a full cache refuses wr
 Production (WCP) should turn it on.
 
 **Consequence found:** `be`'s cache writes aren't wrapped, so a refused write (or Redis being down) turns a successful Postgres read into a 500; see the Phase 9 known issue in `progress.md`.
+
+## be's readiness checks only Postgres
+
+**Decision:** `be`'s `/health/ready` checks Postgres alone; the Redis and Service Bus checks were removed from `be` (the worker keeps all three).
+
+**Why:** readiness decides whether a replica gets traffic, and every replica shares the same dependencies, so a dependency that fails readiness on one fails it on all of them and Container Apps takes the whole API out of rotation.
+Since 10.1 the API copes without Redis (reads fall back to Postgres, creates return 503) and the outbox holds messages while Service Bus is down; failing readiness would turn that partial degradation into a full outage.
+`be` also has only Data Sender on the queue, while the peek check needs Receive, so in Azure the old check would never have passed.
+
+**Trade-off:** a Redis or Service Bus outage no longer shows up in probes; it shows up in App Insights (failed dependency spans, the cache's warning logs, outbox rows piling up). An alert on those belongs to Phase 15.
+
+## Migrations and app roles run as a Container Apps Job, not from the pipeline's runner
+
+**Decision:** `caj-dcrm-migrate-dev` runs the `migrate` image inside the Container Apps environment as `id-dcrm-migrate-dev`, a second Postgres Entra admin; the pipeline starts it and waits for its result.
+
+**Why:** a GitHub-hosted runner is outside Azure, so reaching Postgres from it means opening the firewall to the internet or GitHub's IP ranges, and from Phase 10b the server isn't reachable from outside at all.
+A job inside the environment reaches Postgres the same way the apps do, signs in the same way (a managed-identity token), and keeps working once the network is private.
+Giving the migrations their own identity keeps schema rights away from the apps and away from the pipeline identity, which never talks to the database.
+
+## A separate, long-lived stack for the pipeline identity
+
+**Decision:** `id-dcrm-github` lives in `rg-dcrm-cicd` (stack `dcrm-cicd`), which `down` never deletes; its Contributor role on `rg-dcrm-dev` is created by the dev stack.
+
+**Why:** the environment is rebuilt every session, and an identity rebuilt with it gets a new client ID, so the GitHub secrets would need updating every time.
+The identity and its federated credentials cost nothing to keep.
+
+**Trade-off:** Reader on the whole subscription, because a subscription-level stack's outputs can't be read with a narrower role; the subscription holds only this project.
+
+## Deploys are manual (`workflow_dispatch`)
+
+**Decision:** each app repo's `deploy.yml` runs only from the Actions tab; `ci.yml` builds on every push and pull request.
+
+**Why:** the Azure environment exists only during working sessions, so a deploy on every push to main would fail whenever it's down, and a red pipeline that's normally red teaches everyone to ignore it.
+When the environment becomes long-lived (WCP), the trigger becomes `push` to `main`, with the `dev` GitHub environment's protection rules as the approval gate.
+
+## Application Insights accepts only Entra-authenticated telemetry
+
+**Decision:** `DisableLocalAuth: true` on the App Insights component; both app identities have Monitoring Metrics Publisher, and the Azure Monitor exporter is given the managed-identity credential.
+
+**Why:** a connection string's instrumentation key is enough to write telemetry, and the connection string is not treated as a secret (it's a stack output and an environment variable), so with local auth on anyone holding it could send fake or flooding telemetry.

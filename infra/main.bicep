@@ -12,6 +12,9 @@ param environmentName string
 @description('Tags applied to every resource.')
 param tags object
 
+@description('Principal ID of the GitHub Actions identity, from the dcrm-cicd stack (deploy.sh passes it).')
+param pipelinePrincipalId string
+
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: 'rg-${workload}-${environmentName}'
   location: location
@@ -19,6 +22,14 @@ resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
 }
 
 output resourceGroupName string = rg.name
+
+module pipelineAccess 'modules/pipeline-access.bicep' = {
+  name: 'pipelineAccess'
+  scope: rg
+  params: {
+    pipelinePrincipalId: pipelinePrincipalId
+  }
+}
 
 module monitoring 'modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -28,6 +39,10 @@ module monitoring 'modules/monitoring.bicep' = {
     workload: workload
     environmentName: environmentName
     tags: tags
+    publisherPrincipalIds: [
+      identities.outputs.bePrincipalId
+      identities.outputs.workerPrincipalId
+    ]
   }
 }
 
@@ -53,6 +68,7 @@ module registry 'modules/registry.bicep' = {
     pullPrincipalIds: [
       identities.outputs.bePrincipalId
       identities.outputs.workerPrincipalId
+      identities.outputs.migratePrincipalId
     ]
   }
 }
@@ -65,9 +81,9 @@ module keyVault 'modules/keyvault.bicep' = {
     workload: workload
     environmentName: environmentName
     tags: tags
+    // Only be reads secrets (its Google sign-in settings); the worker has none.
     secretReaderPrincipalIds: [
       identities.outputs.bePrincipalId
-      identities.outputs.workerPrincipalId
     ]
   }
 }
@@ -99,6 +115,8 @@ module postgres 'modules/postgres.bicep' = {
     environmentName: environmentName
     tags: tags
     databaseName: 'distributed_crm'
+    migrateIdentityName: identities.outputs.migrateIdentityName
+    migratePrincipalId: identities.outputs.migratePrincipalId
   }
 }
 
@@ -130,3 +148,23 @@ module containerAppsEnvironment 'modules/containerapps-env.bicep' = {
 }
 
 output keyVaultName string = keyVault.outputs.name
+
+// Everything an app deployment needs, read from this stack by the pipelines: the stack is the single source of truth
+// for names and IDs that change with every teardown and rebuild. None of these are secrets.
+output containerAppsEnvironmentId string = containerAppsEnvironment.outputs.id
+output registryLoginServer string = registry.outputs.loginServer
+output keyVaultUri string = keyVault.outputs.uri
+output postgresHost string = postgres.outputs.host
+output postgresDatabaseName string = postgres.outputs.databaseName
+output redisHost string = redis.outputs.host
+output serviceBusNamespace string = serviceBus.outputs.fullyQualifiedNamespace
+output appInsightsConnectionString string = monitoring.outputs.appInsightsConnectionString
+output beIdentityId string = identities.outputs.beIdentityId
+output beIdentityName string = identities.outputs.beIdentityName
+output beClientId string = identities.outputs.beClientId
+output workerIdentityId string = identities.outputs.workerIdentityId
+output workerIdentityName string = identities.outputs.workerIdentityName
+output workerClientId string = identities.outputs.workerClientId
+output migrateIdentityId string = identities.outputs.migrateIdentityId
+output migrateIdentityName string = identities.outputs.migrateIdentityName
+output migrateClientId string = identities.outputs.migrateClientId

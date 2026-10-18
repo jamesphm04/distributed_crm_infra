@@ -13,6 +13,12 @@ param tags object
 @description('Name of the application database.')
 param databaseName string
 
+@description('Name of the migration job identity, made a second Entra admin.')
+param migrateIdentityName string
+
+@description('Principal ID of the migration job identity.')
+param migratePrincipalId string
+
 resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   name: 'psql-${workload}-${environmentName}-${take(uniqueString(resourceGroup().id), 8)}'
   location: location
@@ -56,6 +62,20 @@ resource entraAdmin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@20
   }
 }
 
+// The migration job runs every deploy's schema changes and creates the apps' roles, both of which need an admin.
+resource migrateAdmin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2024-08-01' = {
+  parent: server
+  name: migratePrincipalId
+  properties: {
+    principalName: migrateIdentityName
+    principalType: 'ServicePrincipal'
+    tenantId: tenant().tenantId
+  }
+  dependsOn: [
+    entraAdmin
+  ]
+}
+
 // 0.0.0.0 to 0.0.0.0 is Azure's special rule for "allow connections from Azure services".
 // A Flexible Server applies one change at a time, so its child resources are chained with dependsOn instead of running in parallel.
 resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
@@ -66,7 +86,7 @@ resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallR
     endIpAddress: '0.0.0.0'
   }
   dependsOn: [
-    entraAdmin
+    migrateAdmin
   ]
 }
 
@@ -84,3 +104,4 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-0
 
 output serverName string = server.name
 output host string = server.properties.fullyQualifiedDomainName
+output databaseName string = database.name
