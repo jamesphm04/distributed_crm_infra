@@ -237,7 +237,7 @@ The rehearsal moves from Monday to Saturday 2026-10-17.
 The cache should be optional (log and serve from Postgres); idempotency must stay strict.
 Fix in Phase 10 alongside the Entra sign-in change to the Redis connection, reproducing it first by stopping Redis and calling the `GET`.
 
-## Phase 10 — GitHub Actions pipeline + first live deploy — in progress
+## Phase 10 — GitHub Actions pipeline + first live deploy — done, verified live
 
 ### 10.1 Redis failure handling — done, verified locally (2026-10-17)
 
@@ -269,7 +269,7 @@ With the Redis password removed, be took the Entra path and failed at startup wi
 So 10.3 sets `AZURE_TOKEN_CREDENTIALS=ManagedIdentityCredential` and `AZURE_CLIENT_ID` on each Container App: only the managed identity is tried, and the user-assigned identity is named.
 The token path itself is first exercised in Azure in 10.3.
 
-### 10.3–10.5 Container Apps, migration job, pipeline — written, verified locally, not yet deployed (2026-10-18)
+### 10.3–10.5 Container Apps, migration job, pipeline — done (2026-10-18)
 
 - **Readiness (be):** `/health/ready` now checks only Postgres. Verified locally: 200 with Redis stopped, 200 with Service Bus stopped, 503 with Postgres stopped.
   Found while reading for the deploy: be's Service Bus readiness check peeks the queue, which needs Receive, and be has only Sender, so in Azure it would never have become ready; and with Redis in readiness, a Redis blip would take both replicas out of traffic.
@@ -280,7 +280,18 @@ The token path itself is first exercised in Azure in 10.3.
 - **Container Apps:** `infra/app.bicep` in be (API + migration job, `deployApi` switch) and worker; build and lint clean.
 - **Workflows:** `ci.yml` in be ran green on GitHub (1m15s). It first warned that the actions ran on deprecated Node 20 and that `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19, the day before the demo; the runner is now pinned to `ubuntu-24.04` and the actions updated (checkout v7, setup-dotnet v6). `deploy.yml` in both repos and the worker's `ci.yml` pass actionlint.
 
-**Still to do (step 7, 10.6):** GitHub `dev` environment and secrets in both repos, `up`, run be's then the worker's Deploy, curl the public URL end to end, read the trace in App Insights, `down`.
+
+### 10.6 First live deploy — done, verified live (2026-10-18)
+
+- `up` (14:18) registered `Microsoft.AlertsManagement` (Phase 9's fix, for real this time) and set the Key Vault secrets on the first attempt.
+- be's first Deploy failed at sign-in with `AADSTS700213`: GitHub sends the **immutable subject** for these repos, `repo:jamesphm04@153576708/distributed_crm_be@1369763321:environment:dev`, and the federated credentials expected `repo:jamesphm04/distributed_crm_be:environment:dev`.
+  A second mistake surfaced at the same time: the worker's GitHub repo is `distributed_crm_worker`; `distributed_crm_etl` was its old name, still in the local remote URL and only working through GitHub's redirect.
+  `cicd/main.bicepparam` now holds each owner and repo with its numeric ID, `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` shows the format a repo uses, and the local remote points at the real name.
+- be's Deploy then passed every step: OIDC sign-in in 4 s, both images pushed, the migration job `Running → Succeeded` in about 45 s (tables, both app roles and grants created by the migrate identity), the API deployed, and `/health/ready` returned `Healthy` through the public URL on the first try.
+- The worker's Deploy passed; its revision went `None → Healthy` in about 10 seconds, so its Postgres, Redis and Service Bus checks all passed with managed-identity tokens.
+- From a laptop: `/health/ready` 200, `/api/return-requests` without a token 401.
+- End to end with a Google ID token: `POST` 201 (`Pending`), and six `GET`s over 30 seconds all returned `Approved`; the worker had finished within the first 5 seconds.
+- App Insights (`requests`): the GETs were served by two different replicas (`cloud_RoleInstance` `a96b1681…` and `5ed854e1…`) with the same answer, and the worker's `ServiceBusProcessor.ProcessMessage` carries the POST's `operation_Id`, so one trace runs from the API request through the outbox and Service Bus to the worker. The union of `requests`, `dependencies` and `traces` for that ID showed both apps' spans in order.
 
 ## Phase 10b — Private network — not started
 

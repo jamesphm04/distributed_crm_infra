@@ -215,7 +215,8 @@ The stack's outputs (environment ID, registry, Key Vault URI, host names, each i
 
 ### CI/CD identity (`infra/cicd/`, stack `dcrm-cicd`)
 
-`rg-dcrm-cicd` holds `id-dcrm-github`, whose federated credentials trust GitHub's OIDC tokens with subject `repo:jamesphm04/<repo>:environment:dev` for `distributed_crm_be` and `distributed_crm_etl` (the worker's GitHub name).
+`rg-dcrm-cicd` holds `id-dcrm-github`, whose federated credentials trust GitHub's OIDC tokens for the `dev` environment of `distributed_crm_be` and `distributed_crm_worker`.
+The subject is GitHub's immutable format, `repo:<owner>@<owner id>/<repo>@<repo id>:environment:dev`, so `cicd/main.bicepparam` holds each name with its numeric ID (`gh api repos/<owner>/<repo> --jq '.owner.id, .id'`).
 It has Reader on the subscription (a subscription-level stack's outputs need it) and, through the dev stack, Contributor on `rg-dcrm-dev`.
 `up` creates or updates this stack first and `down` leaves it alone, so the client ID stored in GitHub never changes.
 

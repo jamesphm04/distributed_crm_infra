@@ -43,7 +43,7 @@ cicd() {
     --action-on-unmanage deleteAll --deny-settings-mode none --yes --output none
 
   # The three values each app repo stores as GitHub secrets. IDs, not credentials: sign-in is OIDC.
-  echo "GitHub secrets for distributed_crm_be and distributed_crm_etl:"
+  echo "GitHub secrets for distributed_crm_be and distributed_crm_worker:"
   echo "  AZURE_CLIENT_ID=$(stack_output "$cicd_stack" pipelineClientId)"
   echo "  AZURE_TENANT_ID=$(az account show --subscription "$subscription" --query tenantId -o tsv)"
   echo "  AZURE_SUBSCRIPTION_ID=$(az account show --subscription "$subscription" --query id -o tsv)"

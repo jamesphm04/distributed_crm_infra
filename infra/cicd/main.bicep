@@ -12,11 +12,17 @@ param workload string
 @description('Tags applied to every resource.')
 param tags object
 
-@description('GitHub account that owns the repos.')
-param githubOwner string
+@description('GitHub account that owns the repos, and its numeric ID.')
+param githubOwner githubAccount
 
 @description('Repos whose workflows may sign in, each from its "dev" GitHub environment.')
-param githubRepos string[]
+param githubRepos githubAccount[]
+
+// GitHub puts both the name and the numeric ID into the token's subject, so both are needed to match it.
+type githubAccount = {
+  name: string
+  id: int
+}
 
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: 'rg-${workload}-cicd'

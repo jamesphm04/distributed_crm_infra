@@ -7,9 +7,18 @@ param tags = {
   purpose: 'demo'
   owner: 'james'
 }
-param githubOwner = 'jamesphm04'
-// The worker's GitHub repo is named distributed_crm_etl.
+// Numeric IDs are public; look them up with: gh api repos/<owner>/<repo> --jq '.owner.id, .id'
+param githubOwner = {
+  name: 'jamesphm04'
+  id: 153576708
+}
 param githubRepos = [
-  'distributed_crm_be'
-  'distributed_crm_etl'
+  {
+    name: 'distributed_crm_be'
+    id: 1369763321
+  }
+  {
+    name: 'distributed_crm_worker'
+    id: 1369764964
+  }
 ]

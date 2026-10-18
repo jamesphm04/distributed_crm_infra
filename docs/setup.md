@@ -7,15 +7,12 @@ distributed_crm/                   <- plain folder, NOT a git repo itself
 ├── CLAUDE.md                      <- project conventions (not tracked in git anywhere)
 ├── distributed_crm_infra/         <- git repo, origin: github.com/jamesphm04/distributed_crm_infra (docker-compose.yml, docs/)
 ├── distributed_crm_be/            <- git repo, origin: github.com/jamesphm04/distributed_crm_be
-├── distributed_crm_worker/        <- git repo, origin: github.com/jamesphm04/distributed_crm_etl (name mismatch, see note below)
+├── distributed_crm_worker/        <- git repo, origin: github.com/jamesphm04/distributed_crm_worker
 └── distributed_crm_fe/            <- git repo, origin: github.com/jamesphm04/distributed_crm_fe
 ```
 
 **Gap:** `CLAUDE.md` is only on this machine's disk.
 Cloning the repos on a new device will NOT bring it over — copy it manually into the `distributed_crm/` folder.
-
-**Note:** `distributed_crm_worker`'s remote is still named `distributed_crm_etl` on GitHub — a leftover from before the repo was renamed locally.
-Doesn't block anything, but worth renaming the GitHub repo itself at some point for consistency.
 
 ## Prerequisites on the new device
 
@@ -42,7 +39,7 @@ Both repos involved are public, so these values never go into git.
    mkdir distributed_crm && cd distributed_crm
    git clone https://github.com/jamesphm04/distributed_crm_infra.git
    git clone https://github.com/jamesphm04/distributed_crm_be.git
-   git clone https://github.com/jamesphm04/distributed_crm_etl.git distributed_crm_worker
+   git clone https://github.com/jamesphm04/distributed_crm_worker.git
    git clone https://github.com/jamesphm04/distributed_crm_fe.git
    ```
 2. Create `distributed_crm_infra/.env` from the template and fill in both values (`.env` is gitignored):
@@ -108,7 +105,7 @@ It then creates or updates the `dcrm-cicd` stack (the GitHub Actions identity, k
 
 ### Deploying the apps (Phase 10)
 
-One-time GitHub setup, in both `distributed_crm_be` and `distributed_crm_etl` (the worker):
+One-time GitHub setup, in both `distributed_crm_be` and `distributed_crm_worker`:
 
 1. **Settings → Environments → New environment** named `dev`. The workflows sign in from it, and Azure trusts only that environment.
 2. Three repository secrets with the values `infra/deploy.sh cicd` prints (IDs, not credentials; sign-in is OIDC):
@@ -118,7 +115,7 @@ One-time GitHub setup, in both `distributed_crm_be` and `distributed_crm_etl` (t
    gh secret set AZURE_SUBSCRIPTION_ID --repo jamesphm04/<repo> --body "<value>"
    ```
 
-Each session, after `up`: **Actions → Deploy → Run workflow** in `distributed_crm_be` first (it runs the migrations), then in `distributed_crm_etl`.
+Each session, after `up`: **Actions → Deploy → Run workflow** in `distributed_crm_be` first (it runs the migrations), then in `distributed_crm_worker`.
 `down` deletes the Container Apps too, because they live in `rg-dcrm-dev`.
 
 ## Creating a migration
