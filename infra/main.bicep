@@ -15,6 +15,9 @@ param tags object
 @description('Principal ID of the GitHub Actions identity, from the dcrm-cicd stack (deploy.sh passes it).')
 param pipelinePrincipalId string
 
+@description('Daily telemetry cap for the Log Analytics workspace, in GB. Ingestion stops for the day once it is reached.')
+param logDailyCapGb string
+
 resource rg 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   name: 'rg-${workload}-${environmentName}'
   location: location
@@ -39,6 +42,7 @@ module monitoring 'modules/monitoring.bicep' = {
     workload: workload
     environmentName: environmentName
     tags: tags
+    dailyCapGb: logDailyCapGb
     publisherPrincipalIds: [
       identities.outputs.bePrincipalId
       identities.outputs.workerPrincipalId

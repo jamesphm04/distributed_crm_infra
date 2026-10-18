@@ -493,3 +493,42 @@ When the environment becomes long-lived (WCP), the trigger becomes `push` to `ma
 **Decision:** `DisableLocalAuth: true` on the App Insights component; both app identities have Monitoring Metrics Publisher, and the Azure Monitor exporter is given the managed-identity credential.
 
 **Why:** a connection string's instrumentation key is enough to write telemetry, and the connection string is not treated as a secret (it's a stack output and an environment variable), so with local auth on anyone holding it could send fake or flooding telemetry.
+
+## Load test: k6, open model, from a laptop
+
+**Decision:** k6 scripts in `distributed_crm_infra/loadtest/`, run from a laptop against the deployed system, with `ramping-arrival-rate` (open-model) executors and two scenarios at once: `lookups` and `journeys`.
+
+**Why:** k6 scripts are JavaScript in git, its thresholds turn a run into a pass/fail exit code that CI can use later, and one laptop generates far more load than this environment can take.
+An open model starts requests on schedule whatever the system does, so a slow system shows up as latency instead of quietly reducing the load, which a fixed pool of looping users would do.
+Two scenarios answer two separate questions: how fast the live-call read is (lookups), and how far decisions lag behind (journeys, through `time_to_decision`).
+Journeys stay at 0.5–2 a second so the worker's backlog stays small enough to drain between runs; the heavy load comes from lookups.
+
+**Trade-off:** the laptop's network adds about 25 ms to every request, and home internet could become the limit at much higher rates (`dropped_iterations` shows when it does).
+Running k6 from a Container Apps Job inside Azure would remove both, and is the natural next step for WCP.
+
+## Load test: record the bottlenecks, don't fix them in Phase 15
+
+**Decision:** Phase 15 measures and records; the worker's throughput and the Redis-outage slowdown are not fixed before the demo.
+The roadmap's "fix it, re-run" moves to after the demo.
+
+**Why:** James's call, to keep Phase 15 to measurement and leave time for the demo (Phase 16).
+The candidate fixes are listed in `loadtest-results.md`, and each will be measured with the same profiles.
+Worker concurrency in particular is a question for WCP's Pinnacle write-back, not just a setting: nobody knows yet whether that bot tolerates parallel writes.
+
+## A cache kill switch (`Caching__Enabled`)
+
+**Decision:** `Caching__Enabled=false` registers `NoOpReturnRequestCache` in place of `RedisReturnRequestCache`; it is on unless set, and flipped with `az containerapp update`.
+
+**Why:** measuring what the cache is worth needs the same system with the cache off, and a switch behind the existing port does that without touching Application.
+It stays as a real operations tool: when Redis misbehaves, reads can bypass it without a deploy.
+Cache entries are not invalidated while it's off, so turning it back on can serve an entry up to one TTL (5 minutes) stale, the same guarantee as a failed invalidation.
+
+## Log Analytics daily cap as a parameter, 5 GB during load tests
+
+**Decision:** `logDailyCapGb` in `main.bicepparam`, normally `'0.5'`, set to `'5'` for Phase 15 and the demo.
+
+**Why:** a stress run produces about 0.5 GB of telemetry (about 11 KB per API request), and when the cap is reached the workspace stops collecting until the next day's reset, losing the evidence mid-investigation.
+Ingestion costs roughly AUD 4–5 per GB, so a test day costs a few dollars.
+Turning on sampling instead would keep costs flat but make every count in App Insights an estimate.
+
+**Open:** on 2026-10-18 the workspace still went `OverQuota` at about 0.57 GB, 24 minutes after the cap was raised to 5 GB; the cause is unknown.

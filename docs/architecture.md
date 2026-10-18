@@ -45,7 +45,7 @@ Every endpoint except `/health/*` requires `Authorization: Bearer <Google ID tok
 | `GET /api/return-requests?page=&pageSize=` | Paginated list, no caching. |
 | `POST /api/return-requests/{id}/cancel` | Optimistic concurrency (`xmin` token) + state-machine guard, both map to `409`. |
 | `GET /health/live` | Anonymous. No checks: `200 Healthy` while the process can serve HTTP. |
-| `GET /health/ready` | Anonymous. Postgres, Redis and Service Bus: `200 Healthy` or `503 Unhealthy`. |
+| `GET /health/ready` | Anonymous. Postgres only (see below): `200 Healthy` or `503 Unhealthy`. |
 
 Clean Architecture layering: `Domain` has zero external dependencies; `Application` defines the ports (`IReturnRequestRepository`, `IUnitOfWork`, `IIdempotencyStore`, `IReturnRequestCache`, `IReturnRequestQueue`) and the use-case handlers; `Infrastructure` implements those ports against Postgres/Redis/Service Bus; `Api` wires DI, handles authentication/authorization, and exposes controllers.
 
@@ -144,6 +144,10 @@ Key format: `idempotency:{key}`.
 - **Cache-aside**: check cache → miss falls through to Postgres → populate cache.
 - **TTL**: 5 minutes, as a safety net.
 - **Explicit invalidation**: `CancelReturnRequestHandler` calls `InvalidateAsync` right after `SaveChangesAsync` — so a cancel is immediately visible to every instance, not just after the TTL expires.
+- **Fails open**: a Redis failure makes a read a miss and skips the write; the request is served from Postgres.
+  Under load this costs more than it should: in the Phase 15 outage run, each failing lookup made two failing Redis calls, each logged with a stack trace, and the replicas saturated their CPU for about two minutes (`loadtest-results.md`).
+- **Kill switch**: `Caching__Enabled=false` registers `NoOpReturnRequestCache` instead, so every read goes to Postgres and nothing is written to Redis.
+  It's on unless set; turn it off with `az containerapp update --set-env-vars Caching__Enabled=false` and back on with `--remove-env-vars Caching__Enabled`.
 
 Key format: `returnrequest:{id}`.
 

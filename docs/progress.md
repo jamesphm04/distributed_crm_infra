@@ -305,7 +305,36 @@ Added 2026-10-17 at James's request, after Phase 9 chose public endpoints with E
 
 ## Phase 14 — Paste-a-phone-number search — not started
 
-## Phase 15 — Load testing with k6 — not started
+## Phase 15 — Load testing with k6 — runs done 2026-10-18; soak pending (Monday)
+
+Pulled ahead of 10b–14 for the 2026-10-20 demo.
+Search doesn't exist yet, so the lookup of one return request stands in for the live-call read; the roadmap's re-run with search comes after Phase 14.
+Full results are in `loadtest-results.md`; the design choices are in `decisions.md`.
+
+- `loadtest/return-requests.js` (infra repo): two k6 scenarios at once, `lookups` (GET from a pool of 200 that `setup()` reuses or creates) and `journeys` (create, then poll every 2 s up to 8 times, with the custom metrics `time_to_decision` and `decided_in_window`).
+  Open-model `ramping-arrival-rate` executors, six profiles (`smoke`, `stress`, `stress-high`, `spike`, `steady`, `soak`), and every request tagged with its `level` and `phase` so each step has its own thresholds.
+  The script refuses to start if the Google token would expire mid-run.
+- be: `Caching__Enabled` switch with `NoOpReturnRequestCache`, deployed through the pipeline (`54ca74e`).
+- Bicep: the Log Analytics daily cap is a parameter, `logDailyCapGb`, raised to 5 GB for the tests and the demo.
+- Results:
+  - The API held **400 lookups/s with p95 33 ms and 0 errors** (over 24,000 staff at one lookup a minute each); its limit wasn't reached. API CPU was 79% at 400/s.
+  - A spike from 10 to 300/s in one second changed nothing.
+  - **The worker is the first bottleneck**: about 65 messages a minute, because each waits a median 844 ms on the approval API and only one is handled at a time. Above 1 journey a second the queue grows without limit (308 messages by the end of the stress run). That is about 3,900 decisions an hour, far above WCP's volume (600–800 quotes a day), but every decision waits in one line behind the external system.
+  - **Cache off**: users saw no difference (a lookup is 1.7 ms on the server; the rest is network), but Postgres CPU went from 11% to 25% and connections from 14 to 29 of 50.
+  - **Redis outage**: creates failed closed as designed (`503` + `Retry-After: 5`, recovered 30 s after Redis returned). Lookups stayed correct but timed out for about two minutes while the replicas' CPU hit 98%; a control restart with Redis healthy showed no such effect.
+- Not fixed, by decision: the worker and the outage behaviour are recorded with candidate fixes for after the demo.
+- Bugs and surprises:
+  - The first smoke run's `setup()` created 170 pool rows, whose messages queued ahead of every journey; later runs reuse the pool.
+  - Turning off Redis public network access blocks new connections but not existing ones.
+  - Log Analytics went `OverQuota` at about 0.57 GB with a 5 GB cap; cause unknown. App Insights has nothing after 07:58 UTC, so the later runs are evidenced by k6, platform metrics and the replica console logs.
+  - A third of trace rows were Redis span events.
+- Verified live against Azure: every run above, from a laptop, with real Google sign-in.
+- Pending: the 30-minute soak on Monday after `up`.
+
+## Phase 16 — Demo — not started
+
+Added 2026-10-18 at James's request, for the 2026-10-20 team demo.
+A study guide with a demo script and Q&A (`docs/demo-guide.md`) and a slide deck covering Phases 1–15.
 
 ## Other repos
 

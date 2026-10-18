@@ -10,6 +10,9 @@ param environmentName string
 @description('Tags applied to every resource.')
 param tags object
 
+@description('Daily ingestion cap in GB, as a string because Bicep has no decimal type (e.g. \'0.5\').')
+param dailyCapGb string
+
 @description('Principal IDs of the app identities that send telemetry.')
 param publisherPrincipalIds string[]
 
@@ -26,7 +29,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
     }
     retentionInDays: 30
     workspaceCapping: {
-      dailyQuotaGb: json('0.5')
+      dailyQuotaGb: json(dailyCapGb)
     }
   }
 }
