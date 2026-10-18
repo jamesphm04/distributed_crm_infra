@@ -85,6 +85,9 @@ When a later quiz answers it correctly, move it to **Resolved** with the date.
 - **Secret values never go in Bicep** (Phase 9, Step 4 Q3): not answered; a value written in a template lands in the public repo and in Azure's deployment history, which anyone with read access to the resource group can open. Values are set separately (`az keyvault secret set`, later the pipeline).
 - **Why a failed deploy can just be re-run** (Phase 9, phase quiz Q1): said the resources are "isolated from each other"; missed that ARM is declarative and idempotent: a failed deployment doesn't roll back, and the next run compares each resource with the template, leaves matching ones alone and creates only what's missing.
 - **Control plane vs data plane** (Phase 9, phase quiz Q3): answered that only the apps may read secrets; missed that Owner is a control-plane role (manage the vault itself) and reading a secret is a data-plane action that needs its own role, which is why the Bicep gives `deployer()` Key Vault Secrets Officer.
+- **What polling measures** (Phase 15, Step 2 Q2): answered "yes" without the reason: the script only looks every 2 s, so `time_to_decision` is "decided by the time we checked", accurate to about ±2 s, never to the millisecond.
+- **Proving a backlog, not guessing it** (Phase 15, Step 2 Q3): named "worker backlog"; the evidence is Service Bus active messages climbing and the worker's processed-per-minute staying flat (about 65) however hard the API is pushed.
+- **Thresholds vs checks, tags** (Phase 15, Step 3 quiz): not answered; James asked the agent to run the rest of Phase 15. A check records one response; a threshold judges the whole run and sets the exit code (99); a `name` tag groups URLs that differ only by ID into one metric.
 - **Case-sensitive patterns** (Phase 8, Steps 6–8 Q3): needed the explanation that Docker matches `.dockerignore` case-sensitively while macOS filenames are not.
 
 ## Resolved
